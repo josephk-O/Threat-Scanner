@@ -294,6 +294,6 @@ For issues or questions:
 3. Create an issue in the repository
 
 ## License
-[Your License Here]
+This project is licensed under the terms of the [MIT License](./LICENSE).
 
 
