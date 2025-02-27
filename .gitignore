@@ -2,6 +2,19 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.env
+venv/
+__pycache__/
+*.pyc
+report_*.json
+
+dont-commit/
+threat_intel.log
+gui.log
+Attack-Surface/requirements.txt
+main.log
+
+
 
 # C extensions
 *.so
