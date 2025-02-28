@@ -9,7 +9,7 @@ Cross-platform application with GUI to detect and analyse potentially malicious 
   - VirusTotal integration
   - AlienVault OTX integration
 - AI-powered analysis using Google's Gemini AI
-- Active connection monitoring
+~~Active connection monitoring~~
 - Historical log analysis
 - Custom IP list scanning
 - Detailed threat reports with confidence scores
@@ -119,7 +119,7 @@ The `-E` flag is important as it preserves environment variables (including your
 #### Using the Interface
 
 1. **IP Scanning Options**
-   - **System Scan**: Click "Start New Scan" to analyze current connections
+   - **System Scan**: Click "Start New Scan" to analyse current connections
    - **Custom IP List**: 
      - Click "Upload IP List" to scan specific IPs
      - Supported format: Text file with one IP per line
@@ -183,7 +183,7 @@ The following enhancements are being considered for future releases:
 - [ ] Local caching mechanism for recent scan results
 - [ ] Memory optimization for large IP datasets
 - [ ] Progressive loading for large result sets
-- [ ] Background scanning with task prioritization
+- [ ] Background scanning with task prioritisation
 - [ ] Smart API request throttling to respect rate limits
 - [ ] Lightweight mode for resource-constrained environments
 
