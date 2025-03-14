@@ -173,53 +173,6 @@ python main.py --ip 8.8.8.8 --json
 - `--service`: Specify service to use (all, both, abuseipdb, virustotal, alienvault)
 - `--json`: Output results in JSON format instead of text
 
-## Future Roadmap
-
-The following enhancements are being considered for future releases:
-
-### Optimizations and Performance
-- [ ] Multi-threading for parallel IP scanning
-- [ ] Batch API requests to reduce network overhead
-- [ ] Local caching mechanism for recent scan results
-- [ ] Memory optimization for large IP datasets
-- [ ] Progressive loading for large result sets
-- [ ] Background scanning with task prioritisation
-- [ ] Smart API request throttling to respect rate limits
-- [ ] Lightweight mode for resource-constrained environments
-
-### Scanning and Detection
-- [ ] Support for IPv6 addresses
-- [ ] Automated periodic scanning capability
-- [ ] Network-wide scanning for internal networks
-- [ ] Integration with additional threat intelligence sources
-- [ ] Customizable threat scoring algorithm
-
-### User Interface
-- [ ] Dark mode UI theme
-- [ ] Customizable dashboard and layouts
-- [ ] Advanced filtering options for scan results
-- [ ] Network visualization of threat origins
-- [ ] Interactive world map of detected threats
-
-### Reporting and Alerts
-- [ ] Multiple export formats (CSV, PDF, HTML)
-- [ ] Email notifications for critical threats
-- [ ] Scheduled report generation
-- [ ] Executive summary reports
-- [ ] Trend analysis for recurring threats
-
-### Advanced Features
-- [ ] Firewall rule generation based on threat findings
-- [ ] Custom IP whitelisting and blacklisting
-- [ ] Database integration for historical tracking
-- [ ] REST API for integration with other security tools
-- [ ] Browser extension for quick IP lookup
-
-### Platform Support
-- [ ] Standalone executable packages
-- [ ] Docker containerization
-- [ ] Mobile companion app for alerts
-- [ ] Installer for easier deployment
 
 ## Output Formats
 
@@ -295,5 +248,53 @@ For issues or questions:
 
 ## License
 This project is licensed under the terms of the [MIT License](./LICENSE).
+
+
+## Things i would like to work on
+
+### Optimizations and Performance
+- [ ] Multi-threading for parallel IP scanning
+- [ ] Batch API requests to reduce network overhead
+- [ ] Local caching mechanism for recent scan results
+- [ ] Memory optimization for large IP datasets
+- [ ] Progressive loading for large result sets
+- [ ] Background scanning with task prioritisation
+- [ ] Smart API request throttling to respect rate limits
+- [ ] Lightweight mode for resource-constrained environments
+
+### Scanning and Detection
+- [ ] Support for IPv6 addresses
+- [ ] Automated periodic scanning capability
+- [ ] Network-wide scanning for internal networks
+- [ ] Integration with additional threat intelligence sources
+- [ ] Customizable threat scoring algorithm
+
+### User Interface
+- [ ] Dark mode UI theme
+- [ ] Customizable dashboard and layouts
+- [ ] Advanced filtering options for scan results
+- [ ] Network visualization of threat origins
+- [ ] Interactive world map of detected threats
+
+### Reporting and Alerts
+- [ ] Multiple export formats (CSV, PDF, HTML)
+- [ ] Email notifications for critical threats
+- [ ] Scheduled report generation
+- [ ] Executive summary reports
+- [ ] Trend analysis for recurring threats
+
+### Advanced Features
+- [ ] Firewall rule generation based on threat findings
+- [ ] Custom IP whitelisting and blacklisting
+- [ ] Database integration for historical tracking
+- [ ] REST API for integration with other security tools
+- [ ] Browser extension for quick IP lookup
+
+### Platform Support
+- [ ] Standalone executable packages
+- [ ] Docker containerization
+- [ ] Mobile companion app for alerts
+- [ ] Installer for easier deployment
+
 
 
