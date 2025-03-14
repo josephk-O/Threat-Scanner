@@ -9,7 +9,6 @@ Cross-platform application with GUI to detect and analyse potentially malicious 
   - VirusTotal integration
   - AlienVault OTX integration
 - AI-powered analysis using Google's Gemini AI
-~~Active connection monitoring~~
 - Historical log analysis
 - Custom IP list scanning
 - Detailed threat reports with confidence scores
