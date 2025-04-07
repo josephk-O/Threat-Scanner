@@ -3,6 +3,10 @@ import requests
 import logging
 import json
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Dict, Any
+from time import sleep
+from functools import wraps
 
 # Configure logging
 logging.basicConfig(
@@ -20,18 +24,25 @@ load_dotenv()
 def check_ip_abuse(ip: str, service='abuseipdb'):
     """Check IP against chosen threat intelligence service."""
     logger.info(f"Checking IP {ip} with service: {service}")
-    if service == 'abuseipdb':
-        return _check_abuseipdb(ip)
-    elif service == 'virustotal':
-        return _check_virustotal(ip)
-    elif service == 'alienvault':
-        return _check_alienvault(ip)
-    elif service == 'both':
-        return check_both_services(ip)
-    elif service == 'all':
-        return check_all_services(ip)
-    else:
-        raise ValueError("Invalid service specified")
+    try:
+        if service == 'abuseipdb':
+            return _check_abuseipdb(ip)
+        elif service == 'virustotal':
+            return _check_virustotal(ip)
+        elif service == 'alienvault':
+            return _check_alienvault(ip)
+        elif service == 'both':
+            return check_both_services(ip)
+        elif service == 'all':
+            return check_all_services(ip)
+        else:
+            raise ValueError("Invalid service specified")
+    except Exception as e:
+        logger.error(f"Error checking IP {ip}: {str(e)}")
+        return {
+            'source': service,
+            'error': f"Check Error: {str(e)}"
+        }
 
 def check_both_services(ip: str):
     """Check IP against both AbuseIPDB and VirusTotal."""
@@ -59,8 +70,81 @@ def check_all_services(ip: str):
         'alienvault': alienvault_result
     }
 
+def scan_ips_parallel(ip_list: List[str], service: str = 'all', max_workers: int = 10) -> Dict[str, Any]:
+    """
+    Scan multiple IPs in parallel using ThreadPoolExecutor.
+    
+    Args:
+        ip_list: List of IP addresses to scan
+        service: Service to use ('all', 'both', 'abuseipdb', 'virustotal', or 'alienvault')
+        max_workers: Maximum number of concurrent threads
+        
+    Returns:
+        Dictionary mapping IP addresses to their scan results
+    """
+    logger.info(f"Starting parallel scan of {len(ip_list)} IPs using {max_workers} workers")
+    results = {}
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Future to IP mapping
+        future_to_ip = {
+            executor.submit(check_ip_abuse, ip, service): ip 
+            for ip in ip_list
+        }
+        
+        # Process completed futures as they finish
+        for future in as_completed(future_to_ip):
+            ip = future_to_ip[future]
+            try:
+                results[ip] = future.result()
+                logger.info(f"Completed scan for IP: {ip}")
+            except Exception as e:
+                logger.error(f"Error scanning IP {ip}: {str(e)}")
+                results[ip] = {
+                    'source': service,
+                    'error': f"Scan Error: {str(e)}"
+                }
+    
+    return results
+
+# Rate limiting for API calls
+def rate_limit(calls: int, period: float):
+    """
+    Decorator to implement rate limiting.
+    
+    Args:
+        calls: Number of calls allowed
+        period: Time period in seconds
+    """
+    from collections import deque
+    from time import time
+    
+    timestamps = deque(maxlen=calls)
+    
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            now = time()
+            
+            # Remove timestamps older than our period
+            while timestamps and timestamps[0] < now - period:
+                timestamps.popleft()
+            
+            # If we've hit our limit, sleep until oldest timestamp expires
+            if len(timestamps) == calls:
+                sleep_time = timestamps[0] - (now - period)
+                if sleep_time > 0:
+                    sleep(sleep_time)
+            
+            timestamps.append(now)
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+# Apply rate limiting to API calls
+@rate_limit(calls=60, period=60)  # 60 calls per minute for AbuseIPDB
 def _check_abuseipdb(ip: str):
-    """Check IP against AbuseIPDB."""
+    """Rate-limited version of AbuseIPDB check"""
     logger.info(f"Checking IP {ip} with AbuseIPDB")
     api_key = os.getenv('ABUSEIPDB_API_KEY')
     if not api_key:
@@ -82,8 +166,107 @@ def _check_abuseipdb(ip: str):
         logger.error(f"AbuseIPDB API error for {ip}: {str(e)}")
         return {'source': 'abuseipdb', 'error': f"API Error: {str(e)}"}
 
+@rate_limit(calls=4, period=60)  # 4 calls per minute for VirusTotal free tier
+def _check_virustotal(ip: str):
+    """Rate-limited version of VirusTotal check"""
+    logger.info(f"Checking IP {ip} with VirusTotal")
+    api_key = os.getenv('VIRUSTOTAL_API_KEY')
+    if not api_key:
+        logger.error("VirusTotal API key not found in .env file")
+        raise ValueError("VirusTotal API key not found in .env file")
+    
+    try:
+     
+        url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
+        headers = {
+            "accept": "application/json",
+            "x-apikey": api_key
+        }
+        
+        logger.debug(f"Making request to VirusTotal: {url}")
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        result = response.json()
+        
+        # Log the full response for debugging
+        logger.debug(f"VirusTotal response for {ip}: {json.dumps(result, indent=2)}")
+        
+        # Check if we have a valid response structure
+        if 'data' not in result or 'attributes' not in result.get('data', {}):
+            logger.error(f"Invalid VirusTotal API response format for {ip}: {json.dumps(result, indent=2)}")
+            return {
+                'source': 'virustotal',
+                'error': "Invalid API response format"
+            }
+        
+        # Extract data from the new API v3 response format
+        attributes = result.get('data', {}).get('attributes', {})
+        
+        # Check if last_analysis_stats exists
+        if 'last_analysis_stats' not in attributes:
+            logger.warning(f"No last_analysis_stats in VirusTotal response for {ip}")
+            # Create default stats
+            last_analysis_stats = {
+                'malicious': 0,
+                'suspicious': 0,
+                'harmless': 0,
+                'undetected': 0,
+                'timeout': 0
+            }
+        else:
+            last_analysis_stats = attributes.get('last_analysis_stats', {})
+        
+        logger.debug(f"Extracted attributes: {json.dumps(attributes, indent=2)}")
+        logger.debug(f"Last analysis stats: {json.dumps(last_analysis_stats, indent=2)}")
+        
+        # Create a more comprehensive data structure with additional attributes
+        processed_data = {
+            'source': 'virustotal',
+            'data': {
+                # Analysis stats
+                'malicious': last_analysis_stats.get('malicious', 0),
+                'suspicious': last_analysis_stats.get('suspicious', 0),
+                'harmless': last_analysis_stats.get('harmless', 0),
+                'undetected': last_analysis_stats.get('undetected', 0),
+                'timeout': last_analysis_stats.get('timeout', 0),
+                
+                # Location and network information
+                'country': attributes.get('country', 'N/A'),
+                'continent': attributes.get('continent', 'N/A'),
+                'as_owner': attributes.get('as_owner', 'Unknown'),
+                'asn': attributes.get('asn', 'N/A'),
+                'network': attributes.get('network', 'N/A'),
+                'regional_internet_registry': attributes.get('regional_internet_registry', 'N/A'),
+                
+                # Reputation and categorization
+                'reputation': attributes.get('reputation', 0),
+                'tags': attributes.get('tags', []),
+                'last_analysis_date': attributes.get('last_analysis_date', 0),
+                'last_modification_date': attributes.get('last_modification_date', 0),
+            }
+        }
+        
+        # Ensure all values are of the expected type
+        for key, value in processed_data['data'].items():
+            if key in ['malicious', 'suspicious', 'harmless', 'undetected', 'timeout']:
+                try:
+                    processed_data['data'][key] = int(value)
+                except (ValueError, TypeError):
+                    logger.warning(f"Converting {key} value '{value}' to 0")
+                    processed_data['data'][key] = 0
+        
+        logger.debug(f"Processed VirusTotal data: {json.dumps(processed_data, indent=2)}")
+        return processed_data
+    except requests.exceptions.RequestException as e:
+        logger.error(f"VirusTotal API request error for {ip}: {str(e)}")
+        return {'source': 'virustotal', 'error': f"API Error: {str(e)}"}
+    except Exception as e:
+        logger.error(f"VirusTotal processing error for {ip}: {str(e)}", exc_info=True)
+        return {'source': 'virustotal', 'error': f"Processing Error: {str(e)}"}
+
+@rate_limit(calls=10, period=60)  # 10 calls per minute for AlienVault OTX
 def _check_alienvault(ip: str):
-    """Check IP against AlienVault OTX."""
+    """Rate-limited version of AlienVault check"""
     logger.info(f"Checking IP {ip} with AlienVault OTX")
     api_key = os.getenv('ALIENVAULT_API_KEY')
     if not api_key:
@@ -258,101 +441,4 @@ def _check_alienvault(ip: str):
         return {'source': 'alienvault', 'error': f"API Error: {str(e)}"}
     except Exception as e:
         logger.error(f"AlienVault processing error for {ip}: {str(e)}", exc_info=True)
-        return {'source': 'alienvault', 'error': f"Processing Error: {str(e)}"}
-
-def _check_virustotal(ip: str):
-    """Check IP against VirusTotal."""
-    logger.info(f"Checking IP {ip} with VirusTotal")
-    api_key = os.getenv('VIRUSTOTAL_API_KEY')
-    if not api_key:
-        logger.error("VirusTotal API key not found in .env file")
-        raise ValueError("VirusTotal API key not found in .env file")
-    
-    try:
-        # Using requests directly for API v3
-        url = f"https://www.virustotal.com/api/v3/ip_addresses/{ip}"
-        headers = {
-            "accept": "application/json",
-            "x-apikey": api_key
-        }
-        
-        logger.debug(f"Making request to VirusTotal: {url}")
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        result = response.json()
-        
-        # Log the full response for debugging
-        logger.debug(f"VirusTotal response for {ip}: {json.dumps(result, indent=2)}")
-        
-        # Check if we have a valid response structure
-        if 'data' not in result or 'attributes' not in result.get('data', {}):
-            logger.error(f"Invalid VirusTotal API response format for {ip}: {json.dumps(result, indent=2)}")
-            return {
-                'source': 'virustotal',
-                'error': "Invalid API response format"
-            }
-        
-        # Extract data from the new API v3 response format
-        attributes = result.get('data', {}).get('attributes', {})
-        
-        # Check if last_analysis_stats exists
-        if 'last_analysis_stats' not in attributes:
-            logger.warning(f"No last_analysis_stats in VirusTotal response for {ip}")
-            # Create default stats
-            last_analysis_stats = {
-                'malicious': 0,
-                'suspicious': 0,
-                'harmless': 0,
-                'undetected': 0,
-                'timeout': 0
-            }
-        else:
-            last_analysis_stats = attributes.get('last_analysis_stats', {})
-        
-        logger.debug(f"Extracted attributes: {json.dumps(attributes, indent=2)}")
-        logger.debug(f"Last analysis stats: {json.dumps(last_analysis_stats, indent=2)}")
-        
-        # Create a more comprehensive data structure with additional attributes
-        processed_data = {
-            'source': 'virustotal',
-            'data': {
-                # Analysis stats
-                'malicious': last_analysis_stats.get('malicious', 0),
-                'suspicious': last_analysis_stats.get('suspicious', 0),
-                'harmless': last_analysis_stats.get('harmless', 0),
-                'undetected': last_analysis_stats.get('undetected', 0),
-                'timeout': last_analysis_stats.get('timeout', 0),
-                
-                # Location and network information
-                'country': attributes.get('country', 'N/A'),
-                'continent': attributes.get('continent', 'N/A'),
-                'as_owner': attributes.get('as_owner', 'Unknown'),
-                'asn': attributes.get('asn', 'N/A'),
-                'network': attributes.get('network', 'N/A'),
-                'regional_internet_registry': attributes.get('regional_internet_registry', 'N/A'),
-                
-                # Reputation and categorization
-                'reputation': attributes.get('reputation', 0),
-                'tags': attributes.get('tags', []),
-                'last_analysis_date': attributes.get('last_analysis_date', 0),
-                'last_modification_date': attributes.get('last_modification_date', 0),
-            }
-        }
-        
-        # Ensure all values are of the expected type
-        for key, value in processed_data['data'].items():
-            if key in ['malicious', 'suspicious', 'harmless', 'undetected', 'timeout']:
-                try:
-                    processed_data['data'][key] = int(value)
-                except (ValueError, TypeError):
-                    logger.warning(f"Converting {key} value '{value}' to 0")
-                    processed_data['data'][key] = 0
-        
-        logger.debug(f"Processed VirusTotal data: {json.dumps(processed_data, indent=2)}")
-        return processed_data
-    except requests.exceptions.RequestException as e:
-        logger.error(f"VirusTotal API request error for {ip}: {str(e)}")
-        return {'source': 'virustotal', 'error': f"API Error: {str(e)}"}
-    except Exception as e:
-        logger.error(f"VirusTotal processing error for {ip}: {str(e)}", exc_info=True)
-        return {'source': 'virustotal', 'error': f"Processing Error: {str(e)}"} 
+        return {'source': 'alienvault', 'error': f"Processing Error: {str(e)}"} 

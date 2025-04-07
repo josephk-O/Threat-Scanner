@@ -69,7 +69,7 @@ class ThreatScannerUI:
             command=self._start_scan
         ).pack(pady=5)
         
-        # Add service information label
+        # Service information label
         ttk.Label(
             header, 
             text="Using AbuseIPDB, VirusTotal, and AlienVault OTX for comprehensive threat intelligence",
@@ -108,7 +108,7 @@ class ThreatScannerUI:
     def _build_results_table(self):
         container = ttk.Frame(self.master)
         
-        # Update table columns to include AlienVault score
+        # Table columns
         columns = ('ip', 'abuseipdb_score', 'virustotal_score', 'alienvault_score', 'country', 'isp')
         self.table = ttk.Treeview(
             container, 
@@ -133,10 +133,10 @@ class ThreatScannerUI:
         self.table.column('country', width=80)
         self.table.column('isp', width=150)
         
-        # Add double-click event to show details
+        # Double-click event to show details
         self.table.bind("<Double-1>", lambda event: self._show_details())
         
-        # Add scrollbar
+        # Scrollbar
         scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL, command=self.table.yview)
         self.table.configure(yscroll=scrollbar.set)
         
@@ -239,10 +239,71 @@ class ThreatScannerUI:
         try:
             service = self.current_service.get()
             logger.info(f"Starting scan with service: {service}")
-            # Pass both IP list and selected service to scanner
-            self.data = self.scanner_callback(self.ip_list if self.ip_list else None, service=service)
-            logger.debug(f"Scan results: {json.dumps(self.data, indent=2)}")
-            self._update_table()
+            
+            # Progress window
+            progress_win = tk.Toplevel(self.master)
+            progress_win.title("Scanning...")
+            progress_win.geometry("300x150")
+            
+            # progress label
+            progress_label = ttk.Label(progress_win, text="Scanning IP addresses...")
+            progress_label.pack(pady=10)
+            
+            # progress bar
+            progress_var = tk.DoubleVar()
+            progress_bar = ttk.Progressbar(
+                progress_win,
+                variable=progress_var,
+                maximum=100,
+                mode='determinate'
+            )
+            progress_bar.pack(fill=tk.X, padx=20, pady=10)
+            
+            # Status label
+            status_label = ttk.Label(progress_win, text="Initializing scan...")
+            status_label.pack(pady=10)
+            
+            # Update progress bar and status
+            def update_progress(current, total, ip=None):
+                if progress_win.winfo_exists():
+                    progress = (current / total) * 100
+                    progress_var.set(progress)
+                    status_label.config(text=f"Scanning {ip}..." if ip else f"Completed {current}/{total} IPs")
+                    progress_win.update()
+            
+            # Run scan in a separate thread to prevent GUI freezing
+            def run_scan():
+                try:
+                    ip_count = len(self.ip_list) if self.ip_list else 1
+                    current = 0
+                    
+                    def progress_callback(ip):
+                        nonlocal current
+                        current += 1
+                        update_progress(current, ip_count, ip)
+                    
+                    # Pass both IP list and selected service to scanner
+                    self.data = self.scanner_callback(
+                        self.ip_list if self.ip_list else None,
+                        service=service,
+                        max_workers=10  #TODO: Add button to make this customisable
+                    )
+                    
+                    # Update UI with results
+                    self.master.after(0, self._update_table)
+                    self.master.after(100, progress_win.destroy)
+                    
+                except Exception as e:
+                    logger.error(f"Error during scan: {str(e)}", exc_info=True)
+                    self.master.after(0, lambda: messagebox.showerror("Error", str(e)))
+                    self.master.after(0, progress_win.destroy)
+            
+            # Start scan thread
+            import threading
+            scan_thread = threading.Thread(target=run_scan)
+            scan_thread.daemon = True
+            scan_thread.start()
+            
         except Exception as e:
             logger.error(f"Error during scan: {str(e)}", exc_info=True)
             messagebox.showerror("Error", str(e))
@@ -1096,7 +1157,6 @@ class ThreatScannerUI:
             output_text.insert(tk.INSERT, f"Testing all services for IP: {ip}\n\n")
             
             try:
-                from scanner.threat_intel import check_ip_abuse
                 
                 result = check_ip_abuse(ip, service="all")
                 output_text.insert(tk.INSERT, json.dumps(result, indent=2))

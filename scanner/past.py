@@ -37,3 +37,5 @@ def get_past_connections():
                 print(f"Error accessing {path}. Run with sudo.")
                 
     return [ip for ip in ips if is_public_ip(ip)] 
+
+
