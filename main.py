@@ -89,14 +89,24 @@ def cli_scan(ip_list, service='all', json_output=False):
                 progress_bar.update(1)
                 progress_bar.set_description(f"Scanning {ip}")
             
-            results = scan_network(
-                ip_list,
-                service=service,
-                max_workers=10 
-            )
-            progress_bar.close()
+            try:
+                results = scan_network(
+                    ip_list,
+                    service=service,
+                    max_workers=10 
+                )
+            except KeyboardInterrupt:
+                progress_bar.close()
+                print("\nScan interrupted by user. Cleaning up...")
+                return
+            finally:
+                progress_bar.close()
         else:
-            results = scan_network(ip_list, service=service)
+            try:
+                results = scan_network(ip_list, service=service)
+            except KeyboardInterrupt:
+                print("\nScan interrupted by user. Cleaning up...")
+                return
         
         if json_output:
             # Output results as JSON
@@ -189,6 +199,8 @@ def cli_scan(ip_list, service='all', json_output=False):
                 else:
                     #TODO: Handle single service results.../ remove
                     pass
+    except KeyboardInterrupt:
+        print("\nScan interrupted by user. Cleaning up...")
     except Exception as e:
         logger.error(f"Error during CLI scan: {str(e)}", exc_info=True)
         print(f"Error: {str(e)}")
@@ -240,38 +252,46 @@ def main():
     parser.add_argument('--workers', type=int, default=10, help='Number of parallel scanning threads')
     args = parser.parse_args()
     
-    # Set up logging level based on debug mode
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-        logger.info("Debug mode enabled")
-    else:
-        logging.getLogger().setLevel(logging.INFO if args.cli else logging.WARNING)
-    
-    # If in CLI/debug mode, or IPs specified, run CLI scan
-    if args.debug or args.cli or args.ip:
-        # Use CLI mode
-        cli_scan(args.ip, args.service, args.json)
-    else:
-        # Use GUI mode
-        try:
-            # Try using ThemedTk with equilux theme
-            root = ThemedTk(theme="equilux")
-            logger.info("Using ThemedTk with equilux theme")
-        except Exception as e:
-            # Fall back to standard Tk if ThemedTk fails
-            logger.warning(f"Could not initialize ThemedTk: {str(e)}")
-            logger.info("Falling back to standard Tk")
-            root = tk.Tk()
-            style = ttk.Style()
+    try:
+        # Set up logging level based on debug mode
+        if args.debug:
+            logging.getLogger().setLevel(logging.DEBUG)
+            logger.info("Debug mode enabled")
+        else:
+            logging.getLogger().setLevel(logging.INFO if args.cli else logging.WARNING)
+        
+        # If in CLI/debug mode, or IPs specified, run CLI scan
+        if args.debug or args.cli or args.ip:
+            # Use CLI mode
+            cli_scan(args.ip, args.service, args.json)
+        else:
+            # Use GUI mode
             try:
-                style.theme_use('clam')  # Try to use clam theme as fallback
-                logger.info("Using ttk clam theme")
-            except tk.TclError:
-                logger.warning("Could not use clam theme, using default theme")
-                # Continue with default theme
-                
-        app = ThreatScannerUI(root, scanner_callback=scan_network)
-        root.mainloop()
+                # Try using ThemedTk with equilux theme
+                root = ThemedTk(theme="equilux")
+                logger.info("Using ThemedTk with equilux theme")
+            except Exception as e:
+                # Fall back to standard Tk if ThemedTk fails
+                logger.warning(f"Could not initialize ThemedTk: {str(e)}")
+                logger.info("Falling back to standard Tk")
+                root = tk.Tk()
+                style = ttk.Style()
+                try:
+                    style.theme_use('clam')  # Try to use clam theme as fallback
+                    logger.info("Using ttk clam theme")
+                except tk.TclError:
+                    logger.warning("Could not use clam theme, using default theme")
+                    
+            app = ThreatScannerUI(root, scanner_callback=scan_network)
+            root.mainloop()
+            
+    except KeyboardInterrupt:
+        print("\nApplication terminated by user.")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        print(f"Error: {str(e)}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main() 
