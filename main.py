@@ -46,6 +46,14 @@ def scan_network(ip_list=None, service='all', max_workers=10):
     """Scan network for threat intelligence."""
     logger.info(f"Scanning network with service: {service}")
     
+    # Store collection stats to return
+    collection_stats = {
+        'active_ips': 0,
+        'past_ips': 0,
+        'total_ips': 0,
+        'message': ''
+    }
+    
     # If no IPs provided, get active and past connections
     if not ip_list:
         try:
@@ -57,20 +65,43 @@ def scan_network(ip_list=None, service='all', max_workers=10):
             # Combine and remove duplicates
             ip_list = list(set(active_ips + past_ips))
             
+            # Store stats
+            collection_stats['active_ips'] = len(active_ips)
+            collection_stats['past_ips'] = len(past_ips)
+            collection_stats['total_ips'] = len(ip_list)
+            
             if ip_list:
-                logger.info(f"Collected {len(ip_list)} IPs from system ({len(active_ips)} active, {len(past_ips)} from logs)")
+                message = f"Collected {len(ip_list)} IPs from system ({len(active_ips)} active, {len(past_ips)} from logs)"
+                logger.info(message)
+                collection_stats['message'] = message
             else:
                 # Fallback to localhost if no connections found
                 ip_list = ['127.0.0.1']
-                logger.info("No connections found, defaulting to localhost")
+                message = "No connections found, defaulting to localhost"
+                logger.info(message)
+                collection_stats['message'] = message
         except Exception as e:
             # If there's an error collecting IPs, fallback to localhost
             ip_list = ['127.0.0.1']
-            logger.error(f"Error collecting system connections: {str(e)}")
+            message = f"Error collecting system connections: {str(e)}"
+            logger.error(message)
+            collection_stats['message'] = message
             logger.info("Defaulting to localhost")
+    else:
+        # Using provided IP list
+        collection_stats['total_ips'] = len(ip_list)
+        collection_stats['message'] = f"Using provided list of {len(ip_list)} IPs"
     
     # Use parallel scanning for multiple IPs
-    return scan_ips_parallel(ip_list, service=service, max_workers=max_workers)
+    results = scan_ips_parallel(ip_list, service=service, max_workers=max_workers)
+    
+    # Add collection stats to results
+    results = {
+        'stats': collection_stats,
+        'results': results
+    }
+    
+    return results
 
 def cli_scan(ip_list, service='all', json_output=False):
     """Command-line interface for scanning IPs."""
@@ -253,19 +284,21 @@ def main():
     args = parser.parse_args()
     
     try:
-        # Set up logging level based on debug mode
+        # Always enable console logging for better visibility
+        logging.getLogger().setLevel(logging.INFO)
+        
+        # If debug mode is enabled, set to DEBUG level
         if args.debug:
             logging.getLogger().setLevel(logging.DEBUG)
             logger.info("Debug mode enabled")
-        else:
-            logging.getLogger().setLevel(logging.INFO if args.cli else logging.WARNING)
         
         # If in CLI/debug mode, or IPs specified, run CLI scan
         if args.debug or args.cli or args.ip:
             # Use CLI mode
             cli_scan(args.ip, args.service, args.json)
         else:
-            # Use GUI mode
+            # Use GUI mode but keep logging visible
+            logger.info("Starting GUI mode")
             try:
                 # Try using ThemedTk with equilux theme
                 root = ThemedTk(theme="equilux")
@@ -283,6 +316,7 @@ def main():
                     logger.warning("Could not use clam theme, using default theme")
                     
             app = ThreatScannerUI(root, scanner_callback=scan_network)
+            logger.info("GUI initialized, starting main loop")
             root.mainloop()
             
     except KeyboardInterrupt:

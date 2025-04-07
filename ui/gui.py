@@ -240,16 +240,19 @@ class ThreatScannerUI:
             service = self.current_service.get()
             logger.info(f"Starting scan with service: {service}")
             
-            # Progress window
+            # Update stats label to show scanning status
+            self.stats_label.config(text="Scanning...")
+            
+            # Create progress window
             progress_win = tk.Toplevel(self.master)
             progress_win.title("Scanning...")
             progress_win.geometry("300x150")
             
-            # progress label
+            # Add progress label
             progress_label = ttk.Label(progress_win, text="Scanning IP addresses...")
             progress_label.pack(pady=10)
             
-            # progress bar
+            # Add progress bar
             progress_var = tk.DoubleVar()
             progress_bar = ttk.Progressbar(
                 progress_win,
@@ -259,7 +262,7 @@ class ThreatScannerUI:
             )
             progress_bar.pack(fill=tk.X, padx=20, pady=10)
             
-            # Status label
+            # Add status label
             status_label = ttk.Label(progress_win, text="Initializing scan...")
             status_label.pack(pady=10)
             
@@ -268,12 +271,15 @@ class ThreatScannerUI:
                 if progress_win.winfo_exists():
                     progress = (current / total) * 100
                     progress_var.set(progress)
-                    status_label.config(text=f"Scanning {ip}..." if ip else f"Completed {current}/{total} IPs")
+                    status_text = f"Scanning {ip}..." if ip else f"Completed {current}/{total} IPs"
+                    status_label.config(text=status_text)
+                    logger.info(status_text)
                     progress_win.update()
             
             # Run scan in a separate thread to prevent GUI freezing
             def run_scan():
                 try:
+                    logger.info("Starting scan thread")
                     ip_count = len(self.ip_list) if self.ip_list else 1
                     current = 0
                     
@@ -283,11 +289,21 @@ class ThreatScannerUI:
                         update_progress(current, ip_count, ip)
                     
                     # Pass both IP list and selected service to scanner
-                    self.data = self.scanner_callback(
+                    logger.info(f"Scanning {ip_count} IPs with {service} service")
+                    scan_data = self.scanner_callback(
                         self.ip_list if self.ip_list else None,
                         service=service,
-                        max_workers=10  #TODO: Add button to make this customisable
+                        max_workers=10
                     )
+                    
+                    # Extract results and stats
+                    self.data = scan_data['results']
+                    stats = scan_data['stats']
+                    
+                    # Update stats label with collection information
+                    self.master.after(0, lambda: self.stats_label.config(text=stats['message']))
+                    
+                    logger.info("Scan completed successfully")
                     
                     # Update UI with results
                     self.master.after(0, self._update_table)
@@ -297,16 +313,19 @@ class ThreatScannerUI:
                     logger.error(f"Error during scan: {str(e)}", exc_info=True)
                     self.master.after(0, lambda: messagebox.showerror("Error", str(e)))
                     self.master.after(0, progress_win.destroy)
+                    self.master.after(0, lambda: self.stats_label.config(text="Scan failed"))
             
             # Start scan thread
             import threading
             scan_thread = threading.Thread(target=run_scan)
             scan_thread.daemon = True
+            logger.info("Starting scan in background thread")
             scan_thread.start()
             
         except Exception as e:
-            logger.error(f"Error during scan: {str(e)}", exc_info=True)
+            logger.error(f"Error during scan setup: {str(e)}", exc_info=True)
             messagebox.showerror("Error", str(e))
+            self.stats_label.config(text="Scan failed")
 
     def _process_abuseipdb_result(self, result):
         """Process AbuseIPDB result and return score string."""
@@ -485,6 +504,14 @@ class ThreatScannerUI:
             self.table.delete(item)
             
         # Add new data
+        total_ips = len(self.data)
+        malicious_count = sum(1 for ip, result in self.data.items() if self._is_ip_malicious(result))
+        
+        # Update stats with scan results
+        self.stats_label.config(
+            text=f"{self.stats_label.cget('text')} | {malicious_count} potentially malicious"
+        )
+        
         for ip, result in self.data.items():
             logger.debug(f"Processing result for IP {ip}: {json.dumps(result, indent=2)}")
             
