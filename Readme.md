@@ -252,7 +252,7 @@ This project is licensed under the terms of the [MIT License](./LICENSE).
 ## Things i would like to work on
 
 ### Optimizations and Performance
-- [ ] Multi-threading for parallel IP scanning
+- [x] Multi-threading for parallel IP scanning
 - [ ] Batch API requests to reduce network overhead
 - [ ] Local caching mechanism for recent scan results
 - [ ] Memory optimization for large IP datasets
