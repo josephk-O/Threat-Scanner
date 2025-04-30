@@ -1,5 +1,5 @@
 psutil==5.9.4         # For network connections and system monitoring
-requests==2.28.2      # For API requests to AbuseIPDB and AlienVault OTX
+requests==2.32.2      # For API requests to AbuseIPDB and AlienVault OTX
 python-dotenv==1.0.0  # For loading API keys from .env file
 ttkthemes==3.2.2      # For themed tkinter GUI
 vt-py==0.19.0         # VirusTotal API client
