@@ -1,76 +1,232 @@
 import os
-import requests
-import logging
 import json
-from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any
-from time import sleep
 from functools import wraps
+from time import perf_counter, sleep
+from typing import Any, Dict, List
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("threat_intel.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("threat_intel")
+import requests
+from dotenv import load_dotenv
+
+from handlers.threat_logging import ThreatScanLogger
+
+
+logger = ThreatScanLogger("threat_intel", logger_level='DEBUG')
 
 load_dotenv()
 
-def check_ip_abuse(ip: str, service='abuseipdb'):
-    """Check IP against chosen threat intelligence service."""
-    logger.info(f"Checking IP {ip} with service: {service}")
+
+SERVICE_LABELS = {
+    'abuseipdb': 'AbuseIPDB',
+    'virustotal': 'VirusTotal',
+    'alienvault': 'AlienVault OTX',
+    'both': 'AbuseIPDB & VirusTotal',
+    'all': 'All services',
+}
+
+
+def _resolve_service_label(service: str) -> str:
+    return SERVICE_LABELS.get(service.lower(), service)
+
+
+def _abuseipdb_threat_score(result: Dict[str, Any], ip: str, log_event: bool = True) -> int:
+    if not isinstance(result, dict) or result.get('error'):
+        return 0
+
+    data = result.get('data', {}) if isinstance(result.get('data'), dict) else {}
+    score_raw = data.get('abuseConfidenceScore', 0)
     try:
-        if service == 'abuseipdb':
-            return _check_abuseipdb(ip)
-        elif service == 'virustotal':
-            return _check_virustotal(ip)
-        elif service == 'alienvault':
-            return _check_alienvault(ip)
-        elif service == 'both':
-            return check_both_services(ip)
-        elif service == 'all':
-            return check_all_services(ip)
+        score = int(score_raw)
+    except (TypeError, ValueError):
+        score = 0
+
+    if score <= 0:
+        return 0
+
+    if score >= 75:
+        severity = 'HIGH'
+    elif score >= 40:
+        severity = 'MEDIUM'
+    else:
+        severity = 'LOW'
+
+    if log_event:
+        logger.threat_detected(
+            'AbuseIPDB',
+            severity,
+            {
+                'ip': ip,
+                'confidence_score': score,
+                'total_reports': data.get('totalReports', 0),
+            },
+        )
+
+    return 1
+
+
+def _virustotal_threat_score(result: Dict[str, Any], ip: str, log_event: bool = True) -> int:
+    if not isinstance(result, dict) or result.get('error'):
+        return 0
+
+    data = result.get('data', {}) if isinstance(result.get('data'), dict) else {}
+    malicious = _coerce_int(data.get('malicious', 0))
+    suspicious = _coerce_int(data.get('suspicious', 0))
+    total = malicious + suspicious
+
+    if total == 0:
+        return 0
+
+    severity = 'HIGH' if malicious else 'MEDIUM'
+
+    if log_event:
+        logger.threat_detected(
+            'VirusTotal',
+            severity,
+            {
+                'ip': ip,
+                'malicious': malicious,
+                'suspicious': suspicious,
+                'reputation': data.get('reputation', 0),
+            },
+        )
+
+    return total
+
+
+def _alienvault_threat_score(result: Dict[str, Any], ip: str, log_event: bool = True) -> int:
+    if not isinstance(result, dict) or result.get('error'):
+        return 0
+
+    data = result.get('data', {}) if isinstance(result.get('data'), dict) else {}
+    threat_score = _coerce_int(data.get('threat_score', 0))
+    pulse_count = _coerce_int(data.get('pulse_count', 0))
+
+    if not threat_score and not pulse_count:
+        return 0
+
+    if threat_score >= 80 or pulse_count >= 8:
+        severity = 'HIGH'
+    elif threat_score >= 50 or pulse_count >= 4:
+        severity = 'MEDIUM'
+    else:
+        severity = 'LOW'
+
+    if log_event:
+        logger.threat_detected(
+            'AlienVault OTX',
+            severity,
+            {
+                'ip': ip,
+                'threat_score': threat_score,
+                'pulse_count': pulse_count,
+                'malware_families': data.get('malware_families', []),
+            },
+        )
+
+    return max(pulse_count, 1) if pulse_count or threat_score else 0
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _collect_threats(service: str, ip: str, result: Dict[str, Any]) -> int:
+    service_key = (service or '').lower()
+
+    if not isinstance(result, dict) or result.get('error'):
+        return 0
+
+    if service_key == 'abuseipdb':
+        return _abuseipdb_threat_score(result, ip, log_event=False)
+    if service_key == 'virustotal':
+        return _virustotal_threat_score(result, ip, log_event=False)
+    if service_key == 'alienvault':
+        return _alienvault_threat_score(result, ip, log_event=False)
+    if service_key == 'both':
+        abuse = result.get('abuseipdb', {})
+        virus = result.get('virustotal', {})
+        return (
+            _abuseipdb_threat_score(abuse, ip, log_event=False) +
+            _virustotal_threat_score(virus, ip, log_event=False)
+        )
+    if service_key == 'all':
+        abuse = result.get('abuseipdb', {})
+        virus = result.get('virustotal', {})
+        alien = result.get('alienvault', {})
+        return (
+            _abuseipdb_threat_score(abuse, ip, log_event=False) +
+            _virustotal_threat_score(virus, ip, log_event=False) +
+            _alienvault_threat_score(alien, ip, log_event=False)
+        )
+
+    return 0
+
+def check_ip_abuse(ip: str, service: str = 'abuseipdb') -> Dict[str, Any]:
+    """Check IP against chosen threat intelligence service."""
+
+    normalized_service = (service or 'abuseipdb').lower()
+    service_label = _resolve_service_label(normalized_service)
+
+    logger.scan_started(ip, service_label)
+    start_time = perf_counter()
+    threats_found = 0
+
+    try:
+        if normalized_service == 'abuseipdb':
+            result = _check_abuseipdb(ip)
+        elif normalized_service == 'virustotal':
+            result = _check_virustotal(ip)
+        elif normalized_service == 'alienvault':
+            result = _check_alienvault(ip)
+        elif normalized_service == 'both':
+            result = {
+                'source': 'both',
+                'abuseipdb': _check_abuseipdb(ip),
+                'virustotal': _check_virustotal(ip),
+            }
+        elif normalized_service == 'all':
+            result = {
+                'source': 'all',
+                'abuseipdb': _check_abuseipdb(ip),
+                'virustotal': _check_virustotal(ip),
+                'alienvault': _check_alienvault(ip),
+            }
         else:
             raise ValueError("Invalid service specified")
-    except Exception as e:
-        logger.error(f"Error checking IP {ip}: {str(e)}")
+
+        threats_found = _collect_threats(normalized_service, ip, result)
+        return result
+    except Exception as exc:
+        logger.error(f"Error checking IP {ip}: {str(exc)}")
         return {
-            'source': service,
-            'error': f"Check Error: {str(e)}"
+            'source': normalized_service,
+            'error': f"Check Error: {str(exc)}",
         }
+    finally:
+        duration = perf_counter() - start_time
+        logger.scan_completed(ip, threats_found, duration)
 
-def check_both_services(ip: str):
+
+def check_both_services(ip: str) -> Dict[str, Any]:
     """Check IP against both AbuseIPDB and VirusTotal."""
-    logger.info(f"Checking IP {ip} with both services")
-    abuseipdb_result = _check_abuseipdb(ip)
-    virustotal_result = _check_virustotal(ip)
-    
-    return {
-        'source': 'both',
-        'abuseipdb': abuseipdb_result,
-        'virustotal': virustotal_result
-    }
 
-def check_all_services(ip: str):
+    return check_ip_abuse(ip, service='both')
+
+
+def check_all_services(ip: str) -> Dict[str, Any]:
     """Check IP against all available threat intelligence services."""
-    logger.info(f"Checking IP {ip} with all services")
-    abuseipdb_result = _check_abuseipdb(ip)
-    virustotal_result = _check_virustotal(ip)
-    alienvault_result = _check_alienvault(ip)
-    
-    return {
-        'source': 'all',
-        'abuseipdb': abuseipdb_result,
-        'virustotal': virustotal_result,
-        'alienvault': alienvault_result
-    }
 
-def scan_ips_parallel(ip_list: List[str], service: str = 'all', max_workers: int = 10) -> Dict[str, Any]:
+    return check_ip_abuse(ip, service='all')
+
+def scan_ips_parallel(
+    ip_list: List[str],
+    service: str = 'all',
+    max_workers: int = 10,
+    progress_callback=None,
+) -> Dict[str, Any]:
     """
     Scan multiple IPs in parallel using ThreadPoolExecutor.
     
@@ -78,15 +234,23 @@ def scan_ips_parallel(ip_list: List[str], service: str = 'all', max_workers: int
         ip_list: List of IP addresses to scan
         service: Service to use ('all', 'both', 'abuseipdb', 'virustotal', or 'alienvault')
         max_workers: Maximum number of concurrent threads
+        progress_callback: Optional callback function to report progress
         
     Returns:
         Dictionary mapping IP addresses to their scan results
     """
-    logger.info(f"Starting parallel scan of {len(ip_list)} IPs using {max_workers} workers")
-    results = {}
+    service_label = _resolve_service_label(service)
+    logger.scan_started(
+        f"{len(ip_list)} targets",
+        f"parallel scan using {service_label} with {max_workers} workers",
+    )
+
+    start_time = perf_counter()
+    threats_found = 0
+    results: Dict[str, Any] = {}
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Future to IP mapping
+        # Create future to IP mapping
         future_to_ip = {
             executor.submit(check_ip_abuse, ip, service): ip 
             for ip in ip_list
@@ -97,15 +261,32 @@ def scan_ips_parallel(ip_list: List[str], service: str = 'all', max_workers: int
             ip = future_to_ip[future]
             try:
                 results[ip] = future.result()
-                logger.info(f"Completed scan for IP: {ip}")
+                threats_found += _collect_threats(service, ip, results[ip])
+                # logger.debug(f"Completed scan for IP: {ip}")
+                if progress_callback:
+                    try:
+                        progress_callback(ip)
+                    except Exception as e:
+                        logger.error(f"Error in progress callback for {ip}: {str(e)}")
             except Exception as e:
                 logger.error(f"Error scanning IP {ip}: {str(e)}")
                 results[ip] = {
                     'source': service,
-                    'error': f"Scan Error: {str(e)}"
+                    'error': f"Scan Error: {str(e)}",
                 }
-    
-    return results
+
+    duration = perf_counter() - start_time
+    logger.scan_completed(f"{len(ip_list)} targets", threats_found, duration)
+
+    return {
+        'stats': {
+            'active_ips': len([ip for ip in ip_list if ip in results and 'error' not in results[ip]]),
+            'failed_ips': len([ip for ip in ip_list if ip in results and 'error' in results[ip]]),
+            'total_ips': len(ip_list),
+            'message': f"Scanned {len(ip_list)} IPs ({len([ip for ip in ip_list if ip in results and 'error' not in results[ip]])} successful)"
+        },
+        'results': results
+    }
 
 # Rate limiting for API calls
 def rate_limit(calls: int, period: float):
@@ -142,10 +323,14 @@ def rate_limit(calls: int, period: float):
     return decorator
 
 # Apply rate limiting to API calls
+@logger.timed_scan(
+    service='AbuseIPDB',
+    target_resolver=lambda ip, **_: ip,
+    threat_counter=lambda result, target, _: _abuseipdb_threat_score(result, target),
+)
 @rate_limit(calls=60, period=60)  # 60 calls per minute for AbuseIPDB
-def _check_abuseipdb(ip: str):
+def _check_abuseipdb(ip: str) -> Dict[str, Any]:
     """Rate-limited version of AbuseIPDB check"""
-    logger.info(f"Checking IP {ip} with AbuseIPDB")
     api_key = os.getenv('ABUSEIPDB_API_KEY')
     if not api_key:
         logger.error("AbuseIPDB API key not found in .env file")
@@ -156,20 +341,24 @@ def _check_abuseipdb(ip: str):
     params = {'ipAddress': ip, 'maxAgeInDays': '90'}
     
     try:
-        logger.debug(f"Making request to AbuseIPDB: {url} with params: {params}")
+        # logger.debug(f"Making request to AbuseIPDB: {url} with params: {params}")
         response = requests.get(url, headers=headers, params=params)
         response.raise_for_status()
         result = response.json()
-        logger.debug(f"AbuseIPDB response for {ip}: {json.dumps(result, indent=2)}")
+        # logger.debug(f"AbuseIPDB response for {ip}: {json.dumps(result, indent=2)}")
         return {'source': 'abuseipdb', 'data': result['data']}
     except requests.exceptions.RequestException as e:
         logger.error(f"AbuseIPDB API error for {ip}: {str(e)}")
         return {'source': 'abuseipdb', 'error': f"API Error: {str(e)}"}
 
+@logger.timed_scan(
+    service='VirusTotal',
+    target_resolver=lambda ip, **_: ip,
+    threat_counter=lambda result, target, _: _virustotal_threat_score(result, target),
+)
 @rate_limit(calls=4, period=60)  # 4 calls per minute for VirusTotal free tier
-def _check_virustotal(ip: str):
+def _check_virustotal(ip: str) -> Dict[str, Any]:
     """Rate-limited version of VirusTotal check"""
-    logger.info(f"Checking IP {ip} with VirusTotal")
     api_key = os.getenv('VIRUSTOTAL_API_KEY')
     if not api_key:
         logger.error("VirusTotal API key not found in .env file")
@@ -183,17 +372,17 @@ def _check_virustotal(ip: str):
             "x-apikey": api_key
         }
         
-        logger.debug(f"Making request to VirusTotal: {url}")
+        # logger.debug(f"Making request to VirusTotal: {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
         
         # Log the full response for debugging
-        logger.debug(f"VirusTotal response for {ip}: {json.dumps(result, indent=2)}")
+        # logger.debug(f"VirusTotal response for {ip}: {json.dumps(result, indent=2)}")
         
         # Check if we have a valid response structure
         if 'data' not in result or 'attributes' not in result.get('data', {}):
-            logger.error(f"Invalid VirusTotal API response format for {ip}: {json.dumps(result, indent=2)}")
+            # logger.error(f"Invalid VirusTotal API response format for {ip}: {json.dumps(result, indent=2)}")
             return {
                 'source': 'virustotal',
                 'error': "Invalid API response format"
@@ -219,7 +408,6 @@ def _check_virustotal(ip: str):
         logger.debug(f"Extracted attributes: {json.dumps(attributes, indent=2)}")
         logger.debug(f"Last analysis stats: {json.dumps(last_analysis_stats, indent=2)}")
         
-        # Create a more comprehensive data structure with additional attributes
         processed_data = {
             'source': 'virustotal',
             'data': {
@@ -255,7 +443,7 @@ def _check_virustotal(ip: str):
                     logger.warning(f"Converting {key} value '{value}' to 0")
                     processed_data['data'][key] = 0
         
-        logger.debug(f"Processed VirusTotal data: {json.dumps(processed_data, indent=2)}")
+        # logger.debug(f"Processed VirusTotal data: {json.dumps(processed_data, indent=2)}")
         return processed_data
     except requests.exceptions.RequestException as e:
         logger.error(f"VirusTotal API request error for {ip}: {str(e)}")
@@ -264,10 +452,14 @@ def _check_virustotal(ip: str):
         logger.error(f"VirusTotal processing error for {ip}: {str(e)}", exc_info=True)
         return {'source': 'virustotal', 'error': f"Processing Error: {str(e)}"}
 
+@logger.timed_scan(
+    service='AlienVault OTX',
+    target_resolver=lambda ip, **_: ip,
+    threat_counter=lambda result, target, _: _alienvault_threat_score(result, target),
+)
 @rate_limit(calls=10, period=60)  # 10 calls per minute for AlienVault OTX
-def _check_alienvault(ip: str):
+def _check_alienvault(ip: str) -> Dict[str, Any]:
     """Rate-limited version of AlienVault check"""
-    logger.info(f"Checking IP {ip} with AlienVault OTX")
     api_key = os.getenv('ALIENVAULT_API_KEY')
     if not api_key:
         logger.error("AlienVault API key not found in .env file")
@@ -281,52 +473,52 @@ def _check_alienvault(ip: str):
             "Accept": "application/json"
         }
         
-        logger.debug(f"Making request to AlienVault OTX: {url}")
+        # logger.debug(f"Making request to AlienVault OTX: {url}")
         response = requests.get(url, headers=headers)
         response.raise_for_status()
         result = response.json()
         
         # Log the full response for debugging
-        logger.debug(f"AlienVault OTX response for {ip}: {json.dumps(result, indent=2)}")
+        # logger.debug(f"AlienVault OTX response for {ip}: {json.dumps(result, indent=2)}")
         
         # Get pulse data (threat intelligence reports)
         reputation_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/reputation"
-        logger.debug(f"Making request to AlienVault OTX reputation: {reputation_url}")
+        # logger.debug(f"Making request to AlienVault OTX reputation: {reputation_url}")
         pulses_response = requests.get(reputation_url, headers=headers)
         pulses_response.raise_for_status()
         pulses_result = pulses_response.json()
         
         # Get geo data
         geo_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/geo"
-        logger.debug(f"Making request to AlienVault OTX geo: {geo_url}")
+        # logger.debug(f"Making request to AlienVault OTX geo: {geo_url}")
         geo_response = requests.get(geo_url, headers=headers)
         geo_response.raise_for_status()
         geo_result = geo_response.json()
         
         # Get malware data
         malware_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/malware"
-        logger.debug(f"Making request to AlienVault OTX malware: {malware_url}")
+        # logger.debug(f"Making request to AlienVault OTX malware: {malware_url}")
         malware_response = requests.get(malware_url, headers=headers)
         malware_response.raise_for_status()
         malware_result = malware_response.json()
         
         # Get URL list data
         url_list_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/url_list"
-        logger.debug(f"Making request to AlienVault OTX url_list: {url_list_url}")
+        # logger.debug(f"Making request to AlienVault OTX url_list: {url_list_url}")
         url_list_response = requests.get(url_list_url, headers=headers)
         url_list_response.raise_for_status()
         url_list_result = url_list_response.json()
         
         # Get passive DNS data
         passive_dns_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/passive_dns"
-        logger.debug(f"Making request to AlienVault OTX passive_dns: {passive_dns_url}")
+        # logger.debug(f"Making request to AlienVault OTX passive_dns: {passive_dns_url}")
         passive_dns_response = requests.get(passive_dns_url, headers=headers)
         passive_dns_response.raise_for_status()
         passive_dns_result = passive_dns_response.json()
         
         # Get HTTP scans data
         http_scans_url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/http_scans"
-        logger.debug(f"Making request to AlienVault OTX http_scans: {http_scans_url}")
+        # logger.debug(f"Making request to AlienVault OTX http_scans: {http_scans_url}")
         http_scans_response = requests.get(http_scans_url, headers=headers)
         http_scans_response.raise_for_status()
         http_scans_result = http_scans_response.json()
@@ -434,7 +626,7 @@ def _check_alienvault(ip: str):
             }
         }
         
-        logger.debug(f"Processed AlienVault data: {json.dumps(processed_data, indent=2)}")
+        # logger.debug(f"Processed AlienVault data: {json.dumps(processed_data, indent=2)}")
         return processed_data
     except requests.exceptions.RequestException as e:
         logger.error(f"AlienVault API request error for {ip}: {str(e)}")
