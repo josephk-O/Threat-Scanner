@@ -18,6 +18,7 @@ class ThreatScannerUI:
         self.current_service = tk.StringVar(value='all')  # Default to all services
         self.ip_list = []
         self.analysis_window = None
+        self._pending_action_reflow = None
         
         logger.info("Initializing ThreatScannerUI")
         
@@ -139,57 +140,103 @@ class ThreatScannerUI:
     def _build_action_panel(self):
         """Build the action panel with buttons"""
         panel = ttk.Frame(self.master)
-        
-        # Export button
-        ttk.Button(
-            panel,
-            text="Export Results",
-            command=self._export_results
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # View Details button
-        ttk.Button(
-            panel,
-            text="View Details",
-            command=self._show_details
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # AbuseIPDB button
-        ttk.Button(
-            panel,
-            text="Open in AbuseIPDB",
-            command=self._open_abuseipdb
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # VirusTotal button
-        ttk.Button(
-            panel,
-            text="Open in VirusTotal",
-            command=self._open_virustotal
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # AlienVault button
-        ttk.Button(
-            panel,
-            text="Open in AlienVault",
-            command=self._open_alienvault
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # AI Analysis button
-        ttk.Button(
-            panel,
-            text="AI security report",
-            command=self._show_ai_analysis
-        ).pack(side=tk.LEFT, padx=5)
-        
-        # Debug button
-        ttk.Button(
-            panel,
-            text="Debug Data",
-            command=self._debug_data
-        ).pack(side=tk.LEFT, padx=5)
-        
-        panel.pack(pady=10)
+        panel.pack(fill=tk.X, pady=10)
+
+        self._action_panel = panel
+        self._action_buttons_frame = ttk.Frame(panel)
+        self._action_buttons_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self._overflow_menu = ttk.Menubutton(panel, text="More…")
+        self._overflow_menu_menu = tk.Menu(self._overflow_menu, tearoff=False)
+        self._overflow_menu["menu"] = self._overflow_menu_menu
+        self._overflow_menu.state(["disabled"])
+        # Do not pack overflow menu yet; we only show it when needed.
+
+        actions = [
+            ("Export Results", self._export_results),
+            ("View Details", self._show_details),
+            ("Open in AbuseIPDB", self._open_abuseipdb),
+            ("Open in VirusTotal", self._open_virustotal),
+            ("Open in AlienVault", self._open_alienvault),
+            ("AI security report", self._show_ai_analysis),
+            ("Debug Data", self._debug_data),
+        ]
+
+        self._action_items = []
+        for label, command in actions:
+            button = ttk.Button(self._action_buttons_frame, text=label, command=command)
+            self._action_items.append({
+                "label": label,
+                "command": command,
+                "button": button,
+            })
+
+        panel.bind("<Configure>", lambda event: self._schedule_action_reflow())
+        self._schedule_action_reflow()
+
+    def _schedule_action_reflow(self):
+        if self._pending_action_reflow is not None:
+            self.master.after_cancel(self._pending_action_reflow)
+        self._pending_action_reflow = self.master.after(75, self._reflow_action_buttons)
+
+    def _reflow_action_buttons(self):
+        self._pending_action_reflow = None
+
+        if not hasattr(self, "_action_items") or not self._action_items:
+            return
+
+        panel_width = self._action_panel.winfo_width()
+        if panel_width <= 1:
+            self._schedule_action_reflow()
+            return
+
+        def required_width(item):
+            button = item["button"]
+            button.update_idletasks()
+            return button.winfo_reqwidth() + 10
+
+        # First try to fit all buttons without an overflow menu.
+        total_required = sum(required_width(item) for item in self._action_items)
+        overflow_items = []
+        visible_items = list(self._action_items)
+
+        if total_required > panel_width:
+            # Reserve space for the overflow menu and determine visible buttons.
+            menu_width = self._overflow_menu.winfo_reqwidth() + 16
+            available = max(panel_width - menu_width, 0)
+            current_width = 0
+            visible_items = []
+            overflow_items = []
+            for item in self._action_items:
+                width = required_width(item)
+                if current_width + width <= available or not visible_items:
+                    visible_items.append(item)
+                    current_width += width
+                else:
+                    overflow_items.append(item)
+
+        # Clear existing layout.
+        for item in self._action_items:
+            item["button"].pack_forget()
+
+        self._overflow_menu_menu.delete(0, tk.END)
+
+        for item in visible_items:
+            item["button"].pack(side=tk.LEFT, padx=5)
+
+        if overflow_items:
+            if not self._overflow_menu.winfo_ismapped():
+                self._overflow_menu.pack(side=tk.RIGHT, padx=5)
+            for item in overflow_items:
+                self._overflow_menu_menu.add_command(
+                    label=item["label"],
+                    command=item["command"],
+                )
+            self._overflow_menu.state(["!disabled"])
+        else:
+            if self._overflow_menu.winfo_ismapped():
+                self._overflow_menu.pack_forget()
+            self._overflow_menu.state(["disabled"])
 
     def _upload_ip_list(self):
         """Handle IP list file upload"""

@@ -1,299 +1,151 @@
 # Network Threat Scanner
 
-Cross-platform application with GUI to detect and analyse potentially malicious IP connections using multiple threat intelligence sources and AI-powered analysis.
+Threat Scanner is a cross-platform Python application that helps investigate potentially malicious IP activity. It combines live network inspection, historical log review, and third-party threat-intelligence feeds inside an approachable Tkinter UI, with a CLI for automation.
 
-## Features
-- Interactive GUI interface with real-time scanning
-- Comprehensive threat intelligence from multiple sources:
-  - AbuseIPDB integration
-  - VirusTotal integration
-  - AlienVault OTX integration
-- AI-powered analysis using Google's Gemini AI
-- Historical log analysis
-- Custom IP list scanning
-- Detailed threat reports with confidence scores
-- Direct links to threat intelligence platforms
-- Export capabilities for further analysis
+## Highlights
 
-## Requirements
-- Python 3.8+
-- Administrator/sudo privileges for log access
-- Tkinter support for GUI
-- API Keys (all free):
-  - AbuseIPDB API key
-  - VirusTotal API key
-  - AlienVault OTX API key
-  - Google Gemini AI API key
+- Multi-source threat enrichment (AbuseIPDB, VirusTotal, AlienVault OTX)
+- Responsive desktop UI with background scanning, progress dialog, and overflow menu for actions
+- AI-assisted reporting powered by Google Gemini to generate security insights and answer follow-up questions
+- Structured logging with rotating files and consistent scan telemetry
+- Parallel scanning with rate-limited API access to respect free-tier quotas
+- Exportable JSON reports for downstream analysis
 
-## Installation
+## Tech Stack
 
-### 1. Install Python Dependencies
+- **Python** 3.8+
+- **Tkinter** + `ttkthemes`
+- **ThreadPoolExecutor** for parallel scans
+- **Requests** for HTTP APIs
+- **dotenv** for runtime configuration
+- **Custom logging handlers** (see `handlers/threat_logging.py`)
 
-#### Windows:
-Python usually comes with Tkinter. If missing:
-1. Download Python from [Python.org](https://python.org)
-2. During installation, ensure "tcl/tk and IDLE" is selected
+## Project Structure
 
-#### macOS:
-```bash
-# Install Python with Tkinter support
-brew install python-tk
-
-# If using Python 3.13 specifically
-brew install python-tk@3.13
+```
+Threat-Scanner/
+├── handlers/            # Logging helpers
+├── logs/                # Rotating log files
+├── scanner/             # Core scanning + AI modules
+├── ui/                  # Tkinter UI implementation
+├── main.py              # Entry point (GUI/CLI)
+├── requirements.txt     # Python dependencies
+└── Readme.md
 ```
 
-#### Ubuntu/Debian:
-```bash
-sudo apt-get update
-sudo apt-get install python3-tk
-```
+## Getting Started
 
-#### CentOS/RHEL:
-```bash
-sudo yum install python3-tkinter
-```
+### 1. Clone & Create Virtual Environment
 
-### 2. Setup Project
-
-1. Clone the repository:
 ```bash
 git clone <repository-url>
-cd network_threat_scanner
-```
+cd Threat-Scanner
 
-2. Create virtual environment:
-```bash
-# Windows
-python -m venv venv
-venv\Scripts\activate
-
-# macOS/Linux
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate  # Windows: venv\Scripts\activate
 ```
 
-3. Install dependencies:
+### 2. Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
 ### 3. Configure API Keys
 
-1. Create a `.env` file in the project root:
+Create a `.env` file in the project root:
+
 ```bash
 touch .env
 ```
 
-2. Add your API keys to `.env`:
-```plaintext
-ABUSEIPDB_API_KEY=your_abuseipdb_key_here
-VIRUSTOTAL_API_KEY=your_virustotal_key_here
-ALIENVAULT_API_KEY=your_alienvault_key_here
-GEMINI_API_KEY=your_gemini_key_here
+Add your keys (free tiers are sufficient while testing):
+
+```dotenv
+ABUSEIPDB_API_KEY=...
+VIRUSTOTAL_API_KEY=...
+ALIENVAULT_API_KEY=...
+GEMINI_API_KEY=...
 ```
 
-## Usage
+### 4. Platform Notes
 
-### GUI Mode (Default)
+- **Windows**: run PowerShell as Administrator before launching the app.
+- **macOS / Linux**: Tkinter comes with most Python installs; if missing, install `python-tk` via Homebrew or your package manager. When running with elevated privileges, use `sudo -E` so environment variables (API keys) survive.
 
-#### Starting the Application
+## Running the Application
 
-#### Windows:
-1. Open PowerShell as Administrator
-2. Navigate to project directory
-3. Run:
-```powershell
-.\venv\Scripts\activate
+### GUI (default)
+
+```bash
 python main.py
 ```
 
-#### macOS/Linux:
-```bash
-source venv/bin/activate
-sudo -E python main.py
-```
-The `-E` flag is important as it preserves environment variables (including your API keys)
+What to expect:
 
-#### Using the Interface
+1. **Start New Scan** – collects active sockets and historical connections, deduplicates, and runs a threat check per IP.
+2. **Progress dialog** – scanning happens on a background thread; the UI stays responsive and shows real-time status.
+3. **Results table** – one row per IP with scores from AbuseIPDB, VirusTotal, and AlienVault plus location metadata.
+4. **Action bar** – primary actions remain on the first row; overflow items move into a `More…` menu if the window is narrow.
+5. **AI report** – use “AI security report” to generate a Gemini summary and ask follow-up questions in a dedicated dialog.
 
-1. **IP Scanning Options**
-   - **System Scan**: Click "Start New Scan" to analyse current connections
-   - **Custom IP List**: 
-     - Click "Upload IP List" to scan specific IPs
-     - Supported format: Text file with one IP per line
-     - Click "Clear IP List" to remove loaded IPs
-
-2. **Results Table**
-   - Displays scan results in real-time
-   - Columns:
-     - IP Address
-     - AbuseIPDB Score
-     - VirusTotal Score
-     - AlienVault Score
-     - Country
-     - ISP
-
-3. **Actions**
-   - **View Details**: Complete information for selected IP
-   - **Open in AbuseIPDB**: View IP in AbuseIPDB database
-   - **Open in VirusTotal**: View IP in VirusTotal database
-   - **Open in AlienVault**: View IP in AlienVault OTX database
-   - **Export Results**: Save scan results as JSON
-   - **AI Analysis**: Get Gemini AI insights about threats
-
-4. **AI Analysis Features**
-   - Click "AI Analysis" to get:
-     - Key security insights
-     - Risk assessment for each IP
-     - Recommended actions
-     - Pattern identification
-   - Ask follow-up questions for clarification
-   - Export AI analysis reports
-
-### CLI Mode
-
-The application also supports command-line operation for scripting or server environments:
+### CLI Examples
 
 ```bash
-# Run in CLI/debug mode
-python main.py --debug
-
-# Scan specific IP addresses
+# Scan specific IPs and print summary
 python main.py --ip 8.8.8.8 1.1.1.1
 
-# Output results as JSON
+# JSON output for automation
 python main.py --ip 8.8.8.8 --json
+
+# Use a specific provider only
+python main.py --ip 8.8.8.8 --service virustotal
 ```
 
-#### CLI Options:
-- `--debug`: Run in debug/CLI mode with detailed logging
-- `--ip [IPs]`: Space-separated list of IP addresses to scan
-- `--service`: Specify service to use (all, both, abuseipdb, virustotal, alienvault)
-- `--json`: Output results in JSON format instead of text
+CLI mode shares the same logging infrastructure and parallel scanning logic as the GUI. Progress bars auto-adjust to the number of targets collected during runtime.
 
+## Configuration & Logging
 
-## Output Formats
+- Logs are written to `logs/<service>.log` with rotation (10 MB × 5 files).
+- Log levels can be changed via `ThreatScanLogger.set_level` if needed.
+- `scanner/threat_intel.py` centralises API rate limits and normalises responses.
 
-### JSON Report Structure
-```json
-{
-  "timestamp": "YYYYMMDD_HHMMSS",
-  "scan_results": {
-    "ip_address": {
-      "source": "all",
-      "abuseipdb": {
-        // AbuseIPDB-specific threat data
-      },
-      "virustotal": {
-        // VirusTotal-specific threat data
-      },
-      "alienvault": {
-        // AlienVault-specific threat data
-      }
-    }
-  },
-  "ai_analysis": {
-    "insights": "",
-    "risk_assessment": "",
-    "recommendations": ""
-  }
-}
-```
+## Testing & Quality
 
-## Troubleshooting
+- Static compilation check:
 
-### GUI Not Starting
-1. Verify Tkinter installation:
-```python
-python -c "import tkinter; tkinter._test()"
-```
-If this fails, reinstall Tkinter using the instructions above.
+  ```bash
+  python -m compileall handlers/threat_logging.py scanner/threat_intel.py ui/gui.py
+  ```
 
-2. Theme issues:
-The application will attempt to use the 'equilux' theme, with fallbacks to 'clam' and finally the default theme if neither is available.
+- API calls require valid credentials; use sandbox/test IPs when exercising the code.
 
-### Permission Errors
-- Windows: Ensure running PowerShell as Administrator
-- macOS/Linux: Use `sudo -E` to preserve environment variables
+## Quick Troubleshooting
 
-### API Errors
-1. Check `.env` file exists in project root
-2. Verify API keys are correct
-3. Ensure no spaces around the API keys in `.env`
+| Issue | Fix |
+|-------|-----|
+| GUI fails to open | Verify Tkinter installation (`python -c "import tkinter; tkinter._test()"`). |
+| Permission errors on macOS/Linux | Run with `sudo -E python main.py`. |
+| API quota exceeded | Reduce concurrency or wait for the provider reset; free tiers have strict limits. |
+| Partial buttons in action bar | Resize window or use the `More…` dropdown (responsive layout is enabled). |
 
-### AI Analysis Issues
-1. Verify GEMINI_API_KEY in .env
-2. Check internet connectivity
-3. Ensure input data is properly formatted
+## Roadmap
 
-### Rate Limits
-- AbuseIPDB: 1000 requests/day (free tier)
-- VirusTotal: 4 requests/minute (free tier)
-- AlienVault OTX: 1000 requests/day (free tier)
-- Gemini AI: 60 requests/minute
-
-## Security and Privacy Notes
-- All API calls are made using HTTPS
-- No data is stored externally
-- Reports are saved locally only
-- Review code before running with elevated privileges
-
-## Support and Contribution
-For issues or questions:
-1. Check the troubleshooting section
-2. Verify all installation steps
-3. Create an issue in the repository
+- Batch lookups and caching of repeated IPs
+- Additional intelligence sources (e.g., Shodan, GreyNoise)
+- Improved reporting (CSV/PDF exports, scheduled jobs)
+- Enhanced visualisation (maps, trend charts)
 
 ## License
-This project is licensed under the terms of the [MIT License](./LICENSE).
 
+MIT License – see [LICENSE](./LICENSE) for full details.
 
-## Things i would like to work on
+## Contributing & Feedback
 
-### Optimizations and Performance
-- [x] Multi-threading for parallel IP scanning
-- [ ] Batch API requests to reduce network overhead
-- [ ] Local caching mechanism for recent scan results
-- [ ] Memory optimization for large IP datasets
-- [ ] Progressive loading for large result sets
-- [ ] Background scanning with task prioritisation
-- [ ] Smart API request throttling to respect rate limits
-- [ ] Lightweight mode for resource-constrained environments
+This project is actively iterated on. If you spot bugs or have feature ideas:
 
-### Scanning and Detection
-- [ ] Support for IPv6 addresses
-- [ ] Automated periodic scanning capability
-- [ ] Network-wide scanning for internal networks
-- [ ] Integration with additional threat intelligence sources
-- [ ] Customizable threat scoring algorithm
+1. Open an issue with reproduction steps and log snippets where possible.
+2. Fork, create a feature branch, and submit a pull request.
+3. Tag improvements with the roadmap categories above to keep things organised.
 
-### User Interface
-- [ ] Dark mode UI theme
-- [ ] Customizable dashboard and layouts
-- [ ] Advanced filtering options for scan results
-- [ ] Network visualization of threat origins
-- [ ] Interactive world map of detected threats
-
-### Reporting and Alerts
-- [ ] Multiple export formats (CSV, PDF, HTML)
-- [ ] Email notifications for critical threats
-- [ ] Scheduled report generation
-- [ ] Executive summary reports
-- [ ] Trend analysis for recurring threats
-
-### Advanced Features
-- [ ] Firewall rule generation based on threat findings
-- [ ] Custom IP whitelisting and blacklisting
-- [ ] Database integration for historical tracking
-- [ ] REST API for integration with other security tools
-- [ ] Browser extension for quick IP lookup
-
-### Platform Support
-- [ ] Standalone executable packages
-- [ ] Docker containerization
-- [ ] Mobile companion app for alerts
-- [ ] Installer for easier deployment
-
-
-
+Happy scanning!
