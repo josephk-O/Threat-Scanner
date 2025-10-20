@@ -1,9 +1,17 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext, filedialog
+from tkinter import ttk, messagebox, filedialog, scrolledtext
 from ttkthemes import ThemedTk
 import json
+import re
 import webbrowser
 from datetime import datetime
+
+from markdown2 import Markdown
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import get_lexer_by_name, guess_lexer
+from tkhtmlview import HTMLScrolledText
+
 from scanner.threat_intel import check_ip_abuse
 from scanner.ai_analysis import analyze_results, get_clarification
 from handlers.threat_logging import ThreatScanLogger
@@ -18,7 +26,17 @@ class ThreatScannerUI:
         self.current_service = tk.StringVar(value='all')  # Default to all services
         self.ip_list = []
         self.analysis_window = None
+        self.analysis_view = None
         self._pending_action_reflow = None
+        self._analysis_markdown = ""
+        self._markdown_renderer = Markdown(extras=[
+            "fenced-code-blocks",
+            "tables",
+            "strike",
+            "cuddled-lists",
+            "code-friendly",
+        ])
+        self._pygments_formatter = HtmlFormatter(noclasses=True)
         
         logger.info("Initializing ThreatScannerUI")
         
@@ -150,7 +168,6 @@ class ThreatScannerUI:
         self._overflow_menu_menu = tk.Menu(self._overflow_menu, tearoff=False)
         self._overflow_menu["menu"] = self._overflow_menu_menu
         self._overflow_menu.state(["disabled"])
-        # Do not pack overflow menu yet; we only show it when needed.
 
         actions = [
             ("Export Results", self._export_results),
@@ -195,13 +212,11 @@ class ThreatScannerUI:
             button.update_idletasks()
             return button.winfo_reqwidth() + 10
 
-        # First try to fit all buttons without an overflow menu.
         total_required = sum(required_width(item) for item in self._action_items)
         overflow_items = []
         visible_items = list(self._action_items)
 
         if total_required > panel_width:
-            # Reserve space for the overflow menu and determine visible buttons.
             menu_width = self._overflow_menu.winfo_reqwidth() + 16
             available = max(panel_width - menu_width, 0)
             current_width = 0
@@ -1068,15 +1083,16 @@ class ThreatScannerUI:
             self.analysis_window = tk.Toplevel(self.master)
             self.analysis_window.title("AI Analysis")
             self.analysis_window.geometry("600x400")
+            self.analysis_window.protocol("WM_DELETE_WINDOW", self._close_analysis_window)
             
-            # Analysis text area
-            self.analysis_text = scrolledtext.ScrolledText(
+            # Analysis HTML view
+            self.analysis_view = HTMLScrolledText(
                 self.analysis_window,
-                wrap=tk.WORD,
+                html="",
                 width=60,
                 height=20
             )
-            self.analysis_text.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
+            self.analysis_view.pack(padx=10, pady=10, fill=tk.BOTH, expand=True)
             
             # Clarification frame
             clarification_frame = ttk.Frame(self.analysis_window)
@@ -1090,27 +1106,47 @@ class ThreatScannerUI:
             ).pack(side=tk.LEFT, padx=5)
             
             clarification_frame.pack(pady=5)
-            
-            # Perform initial analysis
-            self._perform_analysis()
+
+        else:
+            try:
+                self.analysis_window.deiconify()
+                self.analysis_window.lift()
+                self.analysis_window.focus_set()
+            except Exception:
+                pass
+
+        # Perform (or refresh) analysis content
+        self._perform_analysis()
+
+    def _close_analysis_window(self):
+        if self.analysis_window is not None:
+            try:
+                self.analysis_window.destroy()
+            except Exception:
+                pass
+        self.analysis_window = None
+        self.analysis_view = None
 
     def _perform_analysis(self):
         """Perform AI analysis of results"""
         try:
             result = analyze_results(self.data)
-            
+
             if 'error' in result:
-                self.analysis_text.insert(tk.END, f"Error: {result['error']}\n")
+                self._analysis_markdown = f"**Error:** {result['error']}"
+                self._update_analysis_view()
                 return
-                
-            self.analysis_text.delete(1.0, tk.END)
-            self.analysis_text.insert(tk.END, result['analysis'])
-            
-            if result['needs_clarification']:
-                self.analysis_text.insert(tk.END, "\n\nPlease provide additional information if needed.")
-                
+
+            self._analysis_markdown = result.get('analysis', '') or ''
+
+            if result.get('needs_clarification'):
+                self._analysis_markdown += "\n\n> Please provide additional information if needed."
+
+            self._update_analysis_view()
+
         except Exception as e:
-            self.analysis_text.insert(tk.END, f"Analysis error: {str(e)}\n")
+            self._analysis_markdown = f"**Analysis error:** {str(e)}"
+            self._update_analysis_view()
 
     def _get_clarification(self):
         """Get clarification from AI about specific aspects"""
@@ -1121,16 +1157,92 @@ class ThreatScannerUI:
             
         try:
             clarification = get_clarification(
-                self.analysis_text.get(1.0, tk.END),
+                self._analysis_markdown,
                 additional_info
             )
-            
-            self.analysis_text.insert(tk.END, "\n\n--- Clarification ---\n")
-            self.analysis_text.insert(tk.END, f"Question: {additional_info}\n")
-            self.analysis_text.insert(tk.END, f"Response: {clarification}\n")
-            
+
+            clarification_block = (
+                "\n\n--- Clarification ---\n"
+                f"**Question:** {additional_info}\n\n"
+                f"{clarification}"
+            )
+            self._analysis_markdown += clarification_block
+            self._update_analysis_view()
+            self.clarification_entry.delete(0, tk.END)
+
         except Exception as e:
             messagebox.showerror("Error", f"Failed to get clarification: {str(e)}")
+
+    def _update_analysis_view(self):
+        if self.analysis_view is None:
+            return
+        html_content = self._convert_markdown_to_html(self._analysis_markdown)
+        self.analysis_view.set_html(html_content)
+        self.analysis_view.yview_moveto(0)
+
+    def _convert_markdown_to_html(self, markdown_text: str) -> str:
+        if not markdown_text:
+            return "<p>No analysis available.</p>"
+
+        html_content = self._markdown_renderer.convert(markdown_text)
+        html_content = self._highlight_code_blocks(html_content)
+        html_content = self._apply_inline_styles(html_content)
+        return (
+            "<div style=\"font-family:TkDefaultFont; color:#111;\">"
+            f"{html_content}" 
+            "</div>"
+        )
+
+    @staticmethod
+    def _apply_inline_styles(html_content: str) -> str:
+        replacements = {
+            "<blockquote>": "<blockquote style=\"border-left:4px solid #ccc; padding-left:8px; color:#555; margin:0;\">",
+            "<ul>": "<ul style=\"margin-left:1.2em;\">",
+            "<ol>": "<ol style=\"margin-left:1.2em;\">",
+            "<pre>": "<pre style=\"background:#f4f4f4; padding:8px; border-radius:4px;\">",
+        }
+        for original, replacement in replacements.items():
+            html_content = html_content.replace(original, replacement)
+        return html_content
+
+    def _highlight_code_blocks(self, html_content: str) -> str:
+        code_block_pattern = re.compile(
+            r"<pre><code(?: class=\"language-([^\"]*)\")?>(.*?)</code></pre>",
+            re.DOTALL
+        )
+
+        def replacer(match: re.Match) -> str:
+            language = (match.group(1) or "text").lower()
+            code_html = match.group(2)
+            code_text = self._decode_html_entities(code_html)
+
+            try:
+                lexer = get_lexer_by_name(language, stripall=True)
+            except Exception:
+                try:
+                    lexer = guess_lexer(code_text)
+                except Exception:
+                    lexer = get_lexer_by_name("text", stripall=True)
+
+            highlighted = highlight(code_text, lexer, self._pygments_formatter)
+            return f"<pre>{highlighted}</pre>"
+
+        return code_block_pattern.sub(replacer, html_content)
+
+    @staticmethod
+    def _decode_html_entities(value: str) -> str:
+        replacements = {
+            "&lt;": "<",
+            "&gt;": ">",
+            "&amp;": "&",
+            "&quot;": '"',
+            "&#39;": "'",
+            "&nbsp;": " ",
+        }
+        for entity, char in replacements.items():
+            value = value.replace(entity, char)
+        value = value.replace("<br>", "\n").replace("<br/>", "\n").replace("<br />", "\n")
+        return value
 
     def _debug_data(self):
         """Show debug information for the current data"""
