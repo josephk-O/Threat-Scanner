@@ -1,8 +1,7 @@
 from scanner.active import get_active_connections
 from scanner.past import get_past_connections
-from scanner.threat_intel import check_ip_abuse, scan_ips_parallel
+from scanner.threat_intel import scan_ips_parallel
 import json
-from datetime import datetime
 import sys
 import platform
 import psutil
@@ -11,19 +10,13 @@ from ui.gui import ThreatScannerUI
 import argparse
 from tkinter import ttk
 import logging
-import ipaddress
+from time import perf_counter
 from ttkthemes import ThemedTk
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("main.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("main")
+from handlers.threat_logging import ThreatScanLogger
+
+
+logger = ThreatScanLogger("threat_scanner_main", logger_level='INFO')
 
 def check_permissions():
     """Check if script has necessary permissions"""
@@ -42,66 +35,87 @@ def check_permissions():
             message += "    Run as Administrator"
         return message
 
-def scan_network(ip_list=None, service='all', max_workers=10):
+def scan_network(ip_list=None, service='all', max_workers=10, progress_callback=None):
     """Scan network for threat intelligence."""
-    logger.info(f"Scanning network with service: {service}")
-    
-    # Store collection stats to return
+
+    start_time = perf_counter()
+    logger.scan_started("network scan", service)
+
     collection_stats = {
         'active_ips': 0,
         'past_ips': 0,
         'total_ips': 0,
-        'message': ''
+        'message': '',
     }
-    
-    # If no IPs provided, get active and past connections
-    if not ip_list:
-        try:
-            # Get IPs from active connections
-            active_ips = get_active_connections()
-            # Get IPs from system logs
-            past_ips = get_past_connections()
-            
-            # Combine and remove duplicates
-            ip_list = list(set(active_ips + past_ips))
-            
-            # Store stats
-            collection_stats['active_ips'] = len(active_ips)
-            collection_stats['past_ips'] = len(past_ips)
-            collection_stats['total_ips'] = len(ip_list)
-            
-            if ip_list:
-                message = f"Collected {len(ip_list)} IPs from system ({len(active_ips)} active, {len(past_ips)} from logs)"
-                logger.info(message)
-                collection_stats['message'] = message
-            else:
-                # Fallback to localhost if no connections found
-                ip_list = ['127.0.0.1']
-                message = "No connections found, defaulting to localhost"
-                logger.info(message)
-                collection_stats['message'] = message
-        except Exception as e:
-            # If there's an error collecting IPs, fallback to localhost
-            ip_list = ['127.0.0.1']
-            message = f"Error collecting system connections: {str(e)}"
-            logger.error(message)
-            collection_stats['message'] = message
-            logger.info("Defaulting to localhost")
-    else:
-        # Using provided IP list
+
+    if ip_list:
+        ip_list = list(dict.fromkeys(ip_list))
         collection_stats['total_ips'] = len(ip_list)
-        collection_stats['message'] = f"Using provided list of {len(ip_list)} IPs"
-    
-    # Use parallel scanning for multiple IPs
-    results = scan_ips_parallel(ip_list, service=service, max_workers=max_workers)
-    
-    # Add collection stats to results
-    results = {
-        'stats': collection_stats,
-        'results': results
+        collection_stats['message'] = (
+            f"Using provided list of {len(ip_list)} IPs"
+        )
+        logger.info(collection_stats['message'])
+    else:
+        try:
+            active_ips = get_active_connections()
+            past_ips = get_past_connections()
+            ip_list = sorted(set(active_ips + past_ips))
+
+            collection_stats.update(
+                {
+                    'active_ips': len(active_ips),
+                    'past_ips': len(past_ips),
+                    'total_ips': len(ip_list),
+                    'message': (
+                        f"Collected {len(ip_list)} IPs from system "
+                        f"({len(active_ips)} active, {len(past_ips)} from logs)"
+                        if ip_list
+                        else "No connections found, defaulting to localhost"
+                    ),
+                }
+            )
+
+            if not ip_list:
+                ip_list = ['127.0.0.1']
+                collection_stats['total_ips'] = len(ip_list)
+
+            logger.info(collection_stats['message'])
+        except Exception as collection_error:
+            logger.error(
+                f"Error collecting system connections: {collection_error}"
+            )
+            ip_list = ['127.0.0.1']
+            collection_stats['message'] = "Defaulting to localhost"
+            collection_stats['total_ips'] = len(ip_list)
+
+    def wrapped_progress(ip, completed, total):
+        if not progress_callback:
+            return
+        try:
+            progress_callback(ip, completed, total)
+        except TypeError:
+            progress_callback(ip)
+
+    scan_summary = scan_ips_parallel(
+        ip_list,
+        service=service,
+        max_workers=max_workers,
+        progress_callback=wrapped_progress if progress_callback else None,
+    )
+
+    duration = perf_counter() - start_time
+    logger.scan_completed(
+        "network scan",
+        threats_found=scan_summary['stats'].get('threats_found', 0),
+        duration=duration,
+    )
+
+    return {
+        'ip_list': ip_list,
+        'collection_stats': collection_stats,
+        'scan_stats': scan_summary['stats'],
+        'results': scan_summary['results'],
     }
-    
-    return results
 
 def cli_scan(ip_list, service='all', json_output=False):
     """Command-line interface for scanning IPs."""
@@ -109,22 +123,26 @@ def cli_scan(ip_list, service='all', json_output=False):
         # Show progress bar if not outputting JSON
         if not json_output:
             import tqdm
-            total_ips = len(ip_list) if ip_list else 1
+
+            initial_total = len(ip_list) if ip_list else 0
             progress_bar = tqdm.tqdm(
-                total=total_ips,
+                total=initial_total or 1,
                 desc="Scanning IPs",
-                unit="IP"
+                unit="IP",
             )
-            
-            def progress_callback(ip):
+
+            def progress_callback(ip, completed, total):
+                if progress_bar.total != (total or 1):
+                    progress_bar.total = total or 1
                 progress_bar.update(1)
                 progress_bar.set_description(f"Scanning {ip}")
-            
+
             try:
-                results = scan_network(
+                scan_report = scan_network(
                     ip_list,
                     service=service,
-                    max_workers=10 
+                    max_workers=10,
+                    progress_callback=progress_callback,
                 )
             except KeyboardInterrupt:
                 progress_bar.close()
@@ -134,16 +152,32 @@ def cli_scan(ip_list, service='all', json_output=False):
                 progress_bar.close()
         else:
             try:
-                results = scan_network(ip_list, service=service)
+                scan_report = scan_network(ip_list, service=service)
             except KeyboardInterrupt:
                 print("\nScan interrupted by user. Cleaning up...")
                 return
-        
+
         if json_output:
-            # Output results as JSON
-            print(json.dumps(results, indent=2))
+            print(json.dumps(scan_report, indent=2))
         else:
-            # Pretty print results
+            results = scan_report.get('results', {})
+            if not results:
+                print("No results to display.")
+                return
+
+            print("\n=== Scan Summary ===")
+            collection_stats = scan_report.get('collection_stats', {})
+            scan_stats = scan_report.get('scan_stats', {})
+            if collection_stats:
+                print(collection_stats.get('message', ''))
+            if scan_stats:
+                print(
+                    f"Scanned {scan_stats.get('total_ips', 0)} IPs | "
+                    f"{scan_stats.get('active_ips', 0)} succeeded | "
+                    f"{scan_stats.get('failed_ips', 0)} failed | "
+                    f"Threat detections: {scan_stats.get('threats_found', 0)}"
+                )
+
             for ip, result in results.items():
                 print(f"\n===== Results for {ip} =====")
                 

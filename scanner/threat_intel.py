@@ -229,63 +229,81 @@ def scan_ips_parallel(
 ) -> Dict[str, Any]:
     """
     Scan multiple IPs in parallel using ThreadPoolExecutor.
-    
+
     Args:
-        ip_list: List of IP addresses to scan
-        service: Service to use ('all', 'both', 'abuseipdb', 'virustotal', or 'alienvault')
-        max_workers: Maximum number of concurrent threads
-        progress_callback: Optional callback function to report progress
-        
+        ip_list: List of IP addresses to scan.
+        service: Service to use ('all', 'both', 'abuseipdb', 'virustotal', or 'alienvault').
+        max_workers: Maximum number of concurrent threads.
+        progress_callback: Optional callback with signature (ip, completed, total).
+
     Returns:
-        Dictionary mapping IP addresses to their scan results
+        Dictionary containing aggregated stats and per-IP scan results.
     """
+
     service_label = _resolve_service_label(service)
+    total_targets = len(ip_list)
+
     logger.scan_started(
-        f"{len(ip_list)} targets",
+        f"{total_targets} targets",
         f"parallel scan using {service_label} with {max_workers} workers",
     )
 
     start_time = perf_counter()
     threats_found = 0
     results: Dict[str, Any] = {}
-    
+    completed = 0
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create future to IP mapping
         future_to_ip = {
-            executor.submit(check_ip_abuse, ip, service): ip 
+            executor.submit(check_ip_abuse, ip, service): ip
             for ip in ip_list
         }
-        
-        # Process completed futures as they finish
+
         for future in as_completed(future_to_ip):
             ip = future_to_ip[future]
             try:
                 results[ip] = future.result()
                 threats_found += _collect_threats(service, ip, results[ip])
-                # logger.debug(f"Completed scan for IP: {ip}")
-                if progress_callback:
-                    try:
-                        progress_callback(ip)
-                    except Exception as e:
-                        logger.error(f"Error in progress callback for {ip}: {str(e)}")
-            except Exception as e:
-                logger.error(f"Error scanning IP {ip}: {str(e)}")
+                logger.debug(f"Completed scan for IP: {ip}")
+            except Exception as scan_error:
+                logger.error(f"Error scanning IP {ip}: {scan_error}")
                 results[ip] = {
                     'source': service,
-                    'error': f"Scan Error: {str(e)}",
+                    'error': f"Scan Error: {scan_error}",
                 }
+            finally:
+                completed += 1
+                if progress_callback:
+                    try:
+                        progress_callback(ip, completed, total_targets or completed)
+                    except Exception as progress_error:
+                        logger.error(
+                            f"Error in progress callback for {ip}: {progress_error}"
+                        )
 
     duration = perf_counter() - start_time
-    logger.scan_completed(f"{len(ip_list)} targets", threats_found, duration)
+    logger.scan_completed(f"{total_targets} targets", threats_found, duration)
+
+    successful_ips = [
+        ip for ip in ip_list if ip in results and 'error' not in results[ip]
+    ]
+    failed_ips = [
+        ip for ip in ip_list if ip in results and 'error' in results[ip]
+    ]
 
     return {
         'stats': {
-            'active_ips': len([ip for ip in ip_list if ip in results and 'error' not in results[ip]]),
-            'failed_ips': len([ip for ip in ip_list if ip in results and 'error' in results[ip]]),
-            'total_ips': len(ip_list),
-            'message': f"Scanned {len(ip_list)} IPs ({len([ip for ip in ip_list if ip in results and 'error' not in results[ip]])} successful)"
+            'active_ips': len(successful_ips),
+            'failed_ips': len(failed_ips),
+            'total_ips': total_targets,
+            'threats_found': threats_found,
+            'message': (
+                f"Scanned {total_targets} IPs ({len(successful_ips)} successful)"
+                if total_targets
+                else "No IPs scanned"
+            ),
         },
-        'results': results
+        'results': results,
     }
 
 # Rate limiting for API calls
@@ -338,7 +356,7 @@ def _check_abuseipdb(ip: str) -> Dict[str, Any]:
     
     url = 'https://api.abuseipdb.com/api/v2/check'
     headers = {'Key': api_key, 'Accept': 'application/json'}
-    params = {'ipAddress': ip, 'maxAgeInDays': '90'}
+    params = {'ipAddress': ip, 'maxAgeInDays': 90}
     
     try:
         # logger.debug(f"Making request to AbuseIPDB: {url} with params: {params}")
@@ -405,8 +423,8 @@ def _check_virustotal(ip: str) -> Dict[str, Any]:
         else:
             last_analysis_stats = attributes.get('last_analysis_stats', {})
         
-        logger.debug(f"Extracted attributes: {json.dumps(attributes, indent=2)}")
-        logger.debug(f"Last analysis stats: {json.dumps(last_analysis_stats, indent=2)}")
+        # logger.debug(f"Extracted attributes: {json.dumps(attributes, indent=2)}")
+        # logger.debug(f"Last analysis stats: {json.dumps(last_analysis_stats, indent=2)}")
         
         processed_data = {
             'source': 'virustotal',
@@ -465,9 +483,12 @@ def _check_alienvault(ip: str) -> Dict[str, Any]:
         logger.error("AlienVault API key not found in .env file")
         raise ValueError("AlienVault API key not found in .env file")
     
+    
+    
     try:
         # AlienVault OTX API endpoint for IP reputation
-        url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general"
+        # url = f"https://otx.alienvault.com/api/v1/indicators/IPv4/{ip}/general"
+        url = _get_otx_url(ip)
         headers = {
             "X-OTX-API-KEY": api_key,
             "Accept": "application/json"
@@ -634,3 +655,16 @@ def _check_alienvault(ip: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"AlienVault processing error for {ip}: {str(e)}", exc_info=True)
         return {'source': 'alienvault', 'error': f"Processing Error: {str(e)}"} 
+
+import ipaddress
+
+def _get_otx_url(ip: str) -> str:
+    """Returns the correct AlienVault OTX API URL for IPv4 or IPv6."""
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        ip_type = "IPv6" if ip_obj.version == 6 else "IPv4"
+        url = f"https://otx.alienvault.com/api/v1/indicators/{ip_type}/{ip}/general"
+        logger.error(url)
+        return url
+    except ValueError:
+        raise ValueError(f"Invalid IP address: {ip}")

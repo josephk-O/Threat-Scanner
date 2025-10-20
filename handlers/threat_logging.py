@@ -5,6 +5,7 @@ from typing import Optional, Dict, Any, Callable, Union
 from logging.handlers import RotatingFileHandler
 from functools import wraps
 from time import perf_counter
+import colorlog
 
 class ThreatLogger:
     
@@ -49,9 +50,21 @@ class ThreatLogger:
         if log_format is None:
             log_format = '%(asctime)s - %(name)s - [%(levelname)s] - %(filename)s:%(lineno)d - %(message)s'
     
-        formatter = logging.Formatter(log_format)
-        file_handler.setFormatter(formatter)
-        stream_handler.setFormatter(formatter)
+        file_formatter = logging.Formatter(log_format)
+        file_handler.setFormatter(file_formatter)
+        
+        color_formatter = colorlog.ColoredFormatter(
+            "%(log_color)s%(asctime)s - %(name)s - [%(levelname)s] - %(filename)s:%(lineno)d - %(message)s",
+            log_colors={
+                'DEBUG': 'cyan',
+                'INFO': 'green',
+                'WARNING': 'yellow',
+                'ERROR': 'red',
+                'CRITICAL': 'bold_red',
+            }
+        )
+        
+        stream_handler.setFormatter(color_formatter)
         logger.addHandler(file_handler)
         logger.addHandler(stream_handler)
         try:

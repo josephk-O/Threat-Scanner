@@ -11,14 +11,13 @@ def setup_gemini():
         raise ValueError("Gemini API key not found in .env file")
     genai.configure(api_key=api_key)
     
-    # Use the updated model name (gemini-1.5-pro instead of gemini-pro)
     try:
         # Try the newer model first
-        return genai.GenerativeModel('gemini-1.5-pro')
+        return genai.GenerativeModel('gemini-2.5-flash-lite')
     except Exception as e:
         # Fall back to older model if available
         try:
-            return genai.GenerativeModel('gemini-pro')
+            return genai.GenerativeModel('gemini-2.0-flash-lite')
         except Exception as nested_e:
             # If both fail, provide a detailed error
             raise ValueError(f"Could not initialize Gemini AI model. Error with gemini-1.5-pro: {str(e)}. Error with gemini-pro: {str(nested_e)}")

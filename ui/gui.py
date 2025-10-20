@@ -2,22 +2,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog
 from ttkthemes import ThemedTk
 import json
-import logging
 import webbrowser
 from datetime import datetime
 from scanner.threat_intel import check_ip_abuse
 from scanner.ai_analysis import analyze_results, get_clarification
+from handlers.threat_logging import ThreatScanLogger
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("gui.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("gui")
+logger = ThreatScanLogger("gui", logger_level='INFO')
 
 class ThreatScannerUI:
     def __init__(self, master, scanner_callback=None):
@@ -238,7 +229,7 @@ class ThreatScannerUI:
             
         try:
             service = self.current_service.get()
-            logger.info(f"Starting scan with service: {service}")
+            logger.info(f"Starting GUI scan with service: {service}")
             
             # Update stats label to show scanning status
             self.stats_label.config(text="Scanning...")
@@ -247,13 +238,14 @@ class ThreatScannerUI:
             progress_win = tk.Toplevel(self.master)
             progress_win.title("Scanning...")
             progress_win.geometry("300x150")
+            progress_win.transient(self.master)  # Make window modal
             
             # Add progress label
             progress_label = ttk.Label(progress_win, text="Scanning IP addresses...")
             progress_label.pack(pady=10)
             
             # Add progress bar
-            progress_var = tk.DoubleVar()
+            progress_var = tk.DoubleVar(progress_win)
             progress_bar = ttk.Progressbar(
                 progress_win,
                 variable=progress_var,
@@ -266,54 +258,93 @@ class ThreatScannerUI:
             status_label = ttk.Label(progress_win, text="Initializing scan...")
             status_label.pack(pady=10)
             
-            # Update progress bar and status
-            def update_progress(current, total, ip=None):
-                if progress_win.winfo_exists():
-                    progress = (current / total) * 100
-                    progress_var.set(progress)
-                    status_text = f"Scanning {ip}..." if ip else f"Completed {current}/{total} IPs"
-                    status_label.config(text=status_text)
-                    logger.info(status_text)
-                    progress_win.update()
+            # Thread-safe update function
+            def safe_update(progress, status_text):
+                if not progress_win.winfo_exists():
+                    return
+                try:
+                    self.master.after_idle(lambda: [
+                        progress_var.set(progress),
+                        status_label.config(text=status_text),
+                        progress_win.update()
+                    ])
+                except Exception as e:
+                    logger.error(f"Error updating progress: {str(e)}")
             
             # Run scan in a separate thread to prevent GUI freezing
             def run_scan():
                 try:
                     logger.info("Starting scan thread")
-                    ip_count = len(self.ip_list) if self.ip_list else 1
-                    current = 0
-                    
-                    def progress_callback(ip):
-                        nonlocal current
-                        current += 1
-                        update_progress(current, ip_count, ip)
-                    
-                    # Pass both IP list and selected service to scanner
-                    logger.info(f"Scanning {ip_count} IPs with {service} service")
-                    scan_data = self.scanner_callback(
-                        self.ip_list if self.ip_list else None,
-                        service=service,
-                        max_workers=10
+                    requested_ips = list(self.ip_list) if self.ip_list else None
+                    provided_ips = bool(requested_ips)
+
+                    def progress_callback(ip, completed, total):
+                        total = total or completed or 1
+                        progress = (completed / total) * 100
+                        status_text = f"Scanning {ip}... ({completed}/{total})"
+                        logger.debug(status_text)
+                        safe_update(progress, status_text)
+
+                    target_info = (
+                        f"{len(requested_ips)} provided IPs"
+                        if requested_ips
+                        else "collected IPs"
                     )
-                    
-                    # Extract results and stats
-                    self.data = scan_data['results']
-                    stats = scan_data['stats']
-                    
-                    # Update stats label with collection information
-                    self.master.after(0, lambda: self.stats_label.config(text=stats['message']))
-                    
+                    logger.info(f"Scanning {target_info} with {service} service")
+
+                    scan_data = self.scanner_callback(
+                        requested_ips,
+                        service=service,
+                        max_workers=10,
+                        progress_callback=progress_callback
+                    )
+
+                    self.data = scan_data.get('results', {})
+                    collection_stats = scan_data.get('collection_stats', {})
+                    scan_stats = scan_data.get('scan_stats', {})
+                    scanned_ips = scan_data.get('ip_list', [])
+                    self.ip_list = list(scanned_ips)
+
+                    def update_ui():
+                        if progress_win.winfo_exists():
+                            progress_win.destroy()
+
+                        if not provided_ips:
+                            total_collected = len(scanned_ips)
+                            self.ip_status.config(
+                                text=f"Collected {total_collected} IPs for scan"
+                                if total_collected
+                                else "No IP list loaded"
+                            )
+                        else:
+                            self.ip_status.config(
+                                text=f"Loaded {len(self.ip_list)} IPs for scan"
+                            )
+
+                        summary_text = (
+                            f"Scanned {scan_stats.get('total_ips', len(scanned_ips))} IPs | "
+                            f"{scan_stats.get('active_ips', 0)} succeeded | "
+                            f"{scan_stats.get('failed_ips', 0)} failed | "
+                            f"Threat detections: {scan_stats.get('threats_found', 0)}"
+                        )
+
+                        if collection_stats.get('message'):
+                            logger.info(collection_stats['message'])
+
+                        self.stats_label.config(text=summary_text)
+                        self._update_table()
+
+                    self.master.after_idle(update_ui)
                     logger.info("Scan completed successfully")
-                    
-                    # Update UI with results
-                    self.master.after(0, self._update_table)
-                    self.master.after(100, progress_win.destroy)
-                    
+
                 except Exception as e:
                     logger.error(f"Error during scan: {str(e)}", exc_info=True)
-                    self.master.after(0, lambda: messagebox.showerror("Error", str(e)))
-                    self.master.after(0, progress_win.destroy)
-                    self.master.after(0, lambda: self.stats_label.config(text="Scan failed"))
+                    def show_error():
+                        if progress_win.winfo_exists():
+                            progress_win.destroy()
+                        messagebox.showerror("Error", str(e))
+                        self.stats_label.config(text="Scan failed")
+                    self.master.after_idle(show_error)
             
             # Start scan thread
             import threading
@@ -460,142 +491,165 @@ class ThreatScannerUI:
 
     def _is_ip_malicious(self, result):
         """Determine if an IP is malicious based on scan results."""
-        if result['source'] == 'all':
-            # Check AbuseIPDB
-            if ('error' not in result['abuseipdb'] and 
-                result['abuseipdb'].get('data', {}).get('abuseConfidenceScore', 0) > 50):
-                return True
-            # Check VirusTotal
-            if ('error' not in result['virustotal'] and 
-                  result['virustotal'].get('data', {}).get('malicious', 0) > 0):
-                return True
-            # Check AlienVault
-            if ('error' not in result['alienvault'] and 
-                  result['alienvault'].get('data', {}).get('pulse_count', 0) > 0):
-                return True
-        elif result['source'] == 'both':
-            # Check AbuseIPDB
-            if ('error' not in result['abuseipdb'] and 
-                result['abuseipdb'].get('data', {}).get('abuseConfidenceScore', 0) > 50):
-                return True
-            # Check VirusTotal
-            if ('error' not in result['virustotal'] and 
-                  result['virustotal'].get('data', {}).get('malicious', 0) > 0):
-                return True
-        else:
-            # Handle single-service results
-            logger.debug(f"Processing single-service result for {result['ip']}: {result['source']}")
-            if 'error' in result:
-                logger.warning(f"Error in {result['source']} result for {result['ip']}: {result.get('error')}")
+        try:
+            # Handle case where result is None or not a dict
+            if not result or not isinstance(result, dict):
+                logger.warning(f"Invalid result format: {result}")
                 return False
 
-            if result['source'] == 'abuseipdb':
-                return result.get('data', {}).get('abuseConfidenceScore', 0) > 50
-            elif result['source'] == 'virustotal':
-                return result.get('data', {}).get('malicious', 0) > 0
-            elif result['source'] == 'alienvault':
-                return result.get('data', {}).get('pulse_count', 0) > 0
-        return False
+            # Handle error cases
+            if 'error' in result:
+                logger.warning(f"Error in result: {result['error']}")
+                return False
+
+            # Get the source from result
+            source = result.get('source', '')
+            
+            if source == 'all':
+                # Check AbuseIPDB
+                abuseipdb = result.get('abuseipdb', {})
+                if ('error' not in abuseipdb and 
+                    abuseipdb.get('data', {}).get('abuseConfidenceScore', 0) > 50):
+                    return True
+                    
+                # Check VirusTotal
+                virustotal = result.get('virustotal', {})
+                if ('error' not in virustotal and 
+                    virustotal.get('data', {}).get('malicious', 0) > 0):
+                    return True
+                    
+                # Check AlienVault
+                alienvault = result.get('alienvault', {})
+                if ('error' not in alienvault and 
+                    alienvault.get('data', {}).get('pulse_count', 0) > 0):
+                    return True
+                    
+            elif source == 'both':
+                # Check AbuseIPDB
+                abuseipdb = result.get('abuseipdb', {})
+                if ('error' not in abuseipdb and 
+                    abuseipdb.get('data', {}).get('abuseConfidenceScore', 0) > 50):
+                    return True
+                    
+                # Check VirusTotal
+                virustotal = result.get('virustotal', {})
+                if ('error' not in virustotal and 
+                    virustotal.get('data', {}).get('malicious', 0) > 0):
+                    return True
+                    
+            elif source == 'abuseipdb':
+                return ('error' not in result and 
+                       result.get('data', {}).get('abuseConfidenceScore', 0) > 50)
+                       
+            elif source == 'virustotal':
+                return ('error' not in result and 
+                       result.get('data', {}).get('malicious', 0) > 0)
+                       
+            elif source == 'alienvault':
+                return ('error' not in result and 
+                       result.get('data', {}).get('pulse_count', 0) > 0)
+                       
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking if IP is malicious: {str(e)}", exc_info=True)
+            return False
 
     def _update_table(self):
+        """Update the results table with scan data."""
         logger.info("Updating results table")
-        # Clear existing items
-        for item in self.table.get_children():
-            self.table.delete(item)
+        try:
+            # Clear existing items
+            for item in self.table.get_children():
+                self.table.delete(item)
             
-        # Add new data
-        total_ips = len(self.data)
-        malicious_count = sum(1 for ip, result in self.data.items() if self._is_ip_malicious(result))
-        
-        # Update stats with scan results
-        self.stats_label.config(
-            text=f"{self.stats_label.cget('text')} | {malicious_count} potentially malicious"
-        )
-        
-        for ip, result in self.data.items():
-            logger.debug(f"Processing result for IP {ip}: {json.dumps(result, indent=2)}")
+            if not self.data:
+                logger.warning("No data to update table")
+                return
             
-            if result['source'] == 'all':
-                # Process results from all three services
-                logger.debug(f"Processing all-service results for {ip}")
-                abuseipdb_score = self._process_abuseipdb_result(result['abuseipdb'])
-                virustotal_score = self._process_virustotal_result(result['virustotal'])
-                alienvault_score = self._process_alienvault_result(result['alienvault'])
-                country, isp = self._get_location_info(result['abuseipdb'], result['virustotal'], result['alienvault'])
-                
-                logger.debug(f"Table values for {ip}: abuseipdb={abuseipdb_score}, virustotal={virustotal_score}, alienvault={alienvault_score}, country={country}, isp={isp}")
-                self.table.insert('', tk.END, values=(
-                    ip, abuseipdb_score, virustotal_score, alienvault_score, country, isp
-                ))
-            elif result['source'] == 'both':
-                # Process combined results from AbuseIPDB and VirusTotal
-                logger.debug(f"Processing combined results for {ip}")
-                abuseipdb_score = self._process_abuseipdb_result(result['abuseipdb'])
-                virustotal_score = self._process_virustotal_result(result['virustotal'])
-                country, isp = self._get_location_info(result['abuseipdb'], result['virustotal'])
-                
-                logger.debug(f"Table values for {ip}: abuseipdb={abuseipdb_score}, virustotal={virustotal_score}, country={country}, isp={isp}")
-                self.table.insert('', tk.END, values=(
-                    ip, abuseipdb_score, virustotal_score, "N/A", country, isp
-                ))
-            else:
-                # Handle single-service results
-                if result['source'] == 'abuseipdb':
-                    details = result.get('data', {})
-                    logger.debug(f"AbuseIPDB details for {ip}: {json.dumps(details, indent=2)}")
+            # Add new data
+            malicious_count = 0
+            total_ips = 0
+            
+            for ip, result in self.data.items():
+                try:
+                    # logger.debug(f"Processing result for IP {ip}: {json.dumps(result, indent=2)}")
+                    total_ips += 1
+                    
+                    if self._is_ip_malicious(result):
+                        malicious_count += 1
+                    
+                    if result.get('source') == 'all':
+                        # Process results from all three services
+                        # logger.debug(f"Processing all-service results for {ip}")
+                        abuseipdb_score = self._process_abuseipdb_result(result.get('abuseipdb', {}))
+                        virustotal_score = self._process_virustotal_result(result.get('virustotal', {}))
+                        alienvault_score = self._process_alienvault_result(result.get('alienvault', {}))
+                        country, isp = self._get_location_info(
+                            result.get('abuseipdb', {}),
+                            result.get('virustotal', {}),
+                            result.get('alienvault', {})
+                        )
+                        
+                        # logger.debug(f"Table values for {ip}: abuseipdb={abuseipdb_score}, "
+                        #            f"virustotal={virustotal_score}, alienvault={alienvault_score}, "
+                        #            f"country={country}, isp={isp}")
+                        
+                        self.table.insert('', tk.END, values=(
+                            ip, abuseipdb_score, virustotal_score, alienvault_score, country, isp
+                        ))
+                    else:
+                        # Handle single service results
+                        self._insert_single_service_result(ip, result)
+                    
+                except Exception as e:
+                    # logger.error(f"Error processing result for IP {ip}: {str(e)}", exc_info=True)
+                    # Add error row to table
                     self.table.insert('', tk.END, values=(
-                        ip,
-                        f"{details.get('abuseConfidenceScore', 0)}%",
-                        "N/A",
-                        "N/A",
-                        details.get('countryCode', 'N/A'),
-                        details.get('isp', 'Unknown')
-                    ))
-                elif result['source'] == 'virustotal':
-                    logger.debug(f"Processing VirusTotal single-service result for {ip}")
-                    score_display = self._process_virustotal_result(result)
-                    details = result.get('data', {})
-                    
-                    # Get country and ISP info from VirusTotal data
-                    country = details.get('country', 'N/A')
-                    isp = details.get('as_owner', 'Unknown')
-                    
-                    logger.debug(f"VirusTotal table values for {ip}: score={score_display}, country={country}, isp={isp}")
-                    self.table.insert('', tk.END, values=(
-                        ip,
-                        "N/A",
-                        score_display,
-                        "N/A",
-                        country,
-                        isp
-                    ))
-                elif result['source'] == 'alienvault':
-                    logger.debug(f"Processing AlienVault single-service result for {ip}")
-                    score_display = self._process_alienvault_result(result)
-                    details = result.get('data', {})
-                    
-                    # Get country and ISP info from AlienVault data
-                    country = details.get('country_code', 'N/A')
-                    isp = details.get('isp', 'Unknown')
-                    
-                    logger.debug(f"AlienVault table values for {ip}: score={score_display}, country={country}, isp={isp}")
-                    self.table.insert('', tk.END, values=(
-                        ip,
-                        "N/A",
-                        "N/A",
-                        score_display,
-                        country,
-                        isp
+                        ip, "Error", "Error", "Error", "N/A", f"Error: {str(e)}"
                     ))
             
-        # Update stats
-        total_ips = len(self.data)
-        malicious_count = sum(1 for ip, result in self.data.items() if self._is_ip_malicious(result))
-        
-        logger.info(f"Scan stats: {total_ips} IPs scanned, {malicious_count} potentially malicious")
-        self.stats_label.config(
-            text=f"Scanned {total_ips} IPs | {malicious_count} potentially malicious"
-        )
+            # Update stats
+            stats_text = f"Scanned {total_ips} IPs | {malicious_count} potentially malicious"
+            logger.info(stats_text)
+            self.stats_label.config(text=stats_text)
+            
+        except Exception as e:
+            logger.error(f"Error updating table: {str(e)}", exc_info=True)
+            messagebox.showerror("Error", f"Failed to update results table: {str(e)}")
+
+    def _insert_single_service_result(self, ip, result):
+        """Insert a single service result into the table."""
+        source = result.get('source', '')
+        if source == 'abuseipdb':
+            score = self._process_abuseipdb_result(result)
+            data = result.get('data', {})
+            self.table.insert('', tk.END, values=(
+                ip, score, "N/A", "N/A",
+                data.get('countryCode', 'N/A'),
+                data.get('isp', 'Unknown')
+            ))
+        elif source == 'virustotal':
+            score = self._process_virustotal_result(result)
+            data = result.get('data', {})
+            self.table.insert('', tk.END, values=(
+                ip, "N/A", score, "N/A",
+                data.get('country', 'N/A'),
+                data.get('as_owner', 'Unknown')
+            ))
+        elif source == 'alienvault':
+            score = self._process_alienvault_result(result)
+            data = result.get('data', {})
+            self.table.insert('', tk.END, values=(
+                ip, "N/A", "N/A", score,
+                data.get('country_code', 'N/A'),
+                data.get('isp', 'Unknown')
+            ))
+        else:
+            logger.warning(f"Unknown service source: {source}")
+            self.table.insert('', tk.END, values=(
+                ip, "N/A", "N/A", "N/A", "N/A", "Unknown service"
+            ))
 
     def _show_details(self):
         selected = self.table.focus()
@@ -810,7 +864,6 @@ class ThreatScannerUI:
             single_text = scrolledtext.ScrolledText(single_frame, wrap=tk.WORD)
             single_text.insert(tk.INSERT, json.dumps(result, indent=2))
             single_text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-            notebook.add(single_frame, text=result['source'].capitalize())
             
             # Add a formatted summary tab for single service
             if 'error' not in result:
@@ -1082,9 +1135,11 @@ class ThreatScannerUI:
                 entry['abuseipdb_score'] = self._process_abuseipdb_result(result['abuseipdb'])
                 entry['virustotal_score'] = self._process_virustotal_result(result['virustotal'])
                 entry['alienvault_score'] = self._process_alienvault_result(result['alienvault'])
-                country, isp = self._get_location_info(result['abuseipdb'], result['virustotal'], result['alienvault'])
-                entry['country'] = country
-                entry['isp'] = isp
+                country, isp = self._get_location_info(
+                    result.get('abuseipdb', {}),
+                    result.get('virustotal', {}),
+                    result.get('alienvault', {})
+                )
                 
                 # Add raw data for reference
                 entry['abuseipdb_raw'] = result['abuseipdb'].get('data', {})
